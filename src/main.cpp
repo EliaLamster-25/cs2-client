@@ -23,6 +23,9 @@ static const std::wstring kCs2Window = OBFW("\xE8\xC4\xDE\xC5\xDF\xCE\xD9\x86\xF
 static const std::wstring kClientDll = OBFW("\xC8\xC7\xC2\xCE\xC5\xDF\x85\xCF\xC7\xC7", 0xAB);
 static const std::wstring kEngine2Dll = OBFW("\xCE\xC5\xCC\xC2\xC5\xCE\x99\x85\xCF\xC7\xC7", 0xAB);
 
+// Build ID — changes every rebuild, ensuring a different binary hash.
+static const char kBuildId[] = __DATE__ " " __TIME__;
+
 static void tapKey(WORD vk) {
     INPUT inputs[2]{};
     inputs[0].type = INPUT_KEYBOARD;
@@ -52,6 +55,9 @@ static void tapKey(WORD vk) {
 ///   6. Clean up on exit (ESC / WM_QUIT).
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+    // ── Anti-debug: if a debugger is present, die immediately.
+    if (IsDebuggerPresent()) __fastfail(1);
+
     // ── 0. Fix DPI Scaling (Removes pixelation/blurriness) ───────────────
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 

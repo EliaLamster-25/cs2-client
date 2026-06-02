@@ -1,4 +1,5 @@
 #include "offsets.h"
+#include "str_obf.h"
 
 #include "memory/process.h"
 
@@ -175,35 +176,26 @@ bool offsets::resolveRuntime(const Process& proc, std::uintptr_t clientBase) {
         return false;
 
     bool resolvedAny = false;
-    resolvedAny |= resolveClientOffset(proc,
-                                       clientBase,
-                                       "dwEntityList",
-                                       client::dwEntityList,
-                                       "48 8B 0D ?? ?? ?? ?? 48 89 7C 24 ?? 8B FA C1 EB");
-    resolvedAny |= resolveClientOffset(proc,
-                                       clientBase,
-                                       "dwLocalPlayerController",
-                                       client::dwLocalPlayerController,
-                                       "48 8B 05 ?? ?? ?? ?? 41 89 BE");
-    resolvedAny |= resolveClientOffset(proc,
-                                       clientBase,
-                                       "dwViewMatrix",
-                                       client::dwViewMatrix,
-                                       "48 8D 0D ?? ?? ?? ?? 48 C1 E0 06");
-    resolvedAny |= resolveClientOffset(proc,
-                                       clientBase,
-                                       "dwGlobalVars",
-                                       client::dwGlobalVars,
-                                       "48 89 15 ?? ?? ?? ?? 48 89 42");
-    resolvedAny |= resolveClientOffset(proc,
-                                       clientBase,
-                                       "dwPlantedC4",
-                                       client::dwPlantedC4,
-                                       "48 8B 15 ?? ?? ?? ?? 41 FF C0 48 8D 4C 24 ?? 44 89 05 ?? ?? ?? ??");
-    resolvedAny |= resolveClientOffset(proc,
-                                       clientBase,
-                                       "dwWeaponC4",
-                                       client::dwWeaponC4,
-                                       "48 89 05 ?? ?? ?? ?? F7 C1 ?? ?? ?? ?? 74 ?? 81 E1 ?? ?? ?? ?? 89 0D ?? ?? ?? ?? 8B 05 ?? ?? ?? ?? 89 1D ?? ?? ?? ?? EB ?? 48 8B 15 ?? ?? ?? ?? 48 8B 5C 24 ?? FF C0 89 05 ?? ?? ?? ?? 48 8B C6 48 89 34 EA 80 BE");
+
+    const char kObfKey = '\xAB';
+
+    auto s1 = OBF("\x9F\x93\x8B\x93\xE9\x8B\x9B\xEF\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x9F\x93\x8B\x93\x92\x8B\x9C\xE8\x8B\x99\x9F\x8B\x94\x94\x8B\x93\xE9\x8B\xED\xEA\x8B\xE8\x9A\x8B\xEE\xE9", kObfKey);
+    resolvedAny |= resolveClientOffset(proc, clientBase, "dwEntityList", client::dwEntityList, s1);
+
+    auto s2 = OBF("\x9F\x93\x8B\x93\xE9\x8B\x9B\x9E\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x9F\x9A\x8B\x93\x92\x8B\xE9\xEE", kObfKey);
+    resolvedAny |= resolveClientOffset(proc, clientBase, "dwLocalPlayerController", client::dwLocalPlayerController, s2);
+
+    auto s3 = OBF("\x9F\x93\x8B\x93\xEF\x8B\x9B\xEF\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x9F\x93\x8B\xE8\x9A\x8B\xEE\x9B\x8B\x9B\x9D", kObfKey);
+    resolvedAny |= resolveClientOffset(proc, clientBase, "dwViewMatrix", client::dwViewMatrix, s3);
+
+    auto s4 = OBF("\x9F\x93\x8B\x93\x92\x8B\x9A\x9E\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x9F\x93\x8B\x93\x92\x8B\x9F\x99", kObfKey);
+    resolvedAny |= resolveClientOffset(proc, clientBase, "dwGlobalVars", client::dwGlobalVars, s4);
+
+    auto s5 = OBF("\x9F\x93\x8B\x93\xE9\x8B\x9A\x9E\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x9F\x9A\x8B\xED\xED\x8B\xE8\x9B\x8B\x9F\x93\x8B\x93\xEF\x8B\x9F\xE8\x8B\x99\x9F\x8B\x94\x94\x8B\x9F\x9F\x8B\x93\x92\x8B\x9B\x9E\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94", kObfKey);
+    resolvedAny |= resolveClientOffset(proc, clientBase, "dwPlantedC4", client::dwPlantedC4, s5);
+
+    auto s6 = OBF("\x9F\x93\x8B\x93\x92\x8B\x9B\x9E\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\xED\x9C\x8B\xE8\x9A\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x9C\x9F\x8B\x94\x94\x8B\x93\x9A\x8B\xEE\x9A\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x93\x92\x8B\x9B\xEF\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x93\xE9\x8B\x9B\x9E\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x93\x92\x8B\x9A\xEF\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\xEE\xE9\x8B\x94\x94\x8B\x9F\x93\x8B\x93\xE9\x8B\x9A\x9E\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x9F\x93\x8B\x93\xE9\x8B\x9E\xE8\x8B\x99\x9F\x8B\x94\x94\x8B\xED\xED\x8B\xE8\x9B\x8B\x93\x92\x8B\x9B\x9E\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x94\x94\x8B\x9F\x93\x8B\x93\xE9\x8B\xE8\x9D\x8B\x9F\x93\x8B\x93\x92\x8B\x98\x9F\x8B\xEE\xEA\x8B\x93\x9B\x8B\xE9\xEE", kObfKey);
+    resolvedAny |= resolveClientOffset(proc, clientBase, "dwWeaponC4", client::dwWeaponC4, s6);
+
     return resolvedAny;
 }
