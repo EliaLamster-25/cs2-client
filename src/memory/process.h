@@ -26,14 +26,20 @@ public:
     /// Look up the base address of a loaded module (e.g. L"client.dll").
     std::uintptr_t getModuleBase(const std::wstring& moduleName) const;
 
+    /// Open a fresh process handle (closes any existing one).
+    bool openHandle();
+
+    /// Close the current process handle.
+    void closeHandle();
+
     /// @return Raw Win32 handle — needed by RPM wrappers.
     HANDLE handle() const { return m_handle; }
 
     /// @return Process ID.
     DWORD pid() const { return m_pid; }
 
-    /// @return True if currently attached.
-    bool isAttached() const { return m_handle != nullptr; }
+    /// @return True if the process was found (handle may be temporarily closed).
+    bool isAttached() const { return m_pid != 0; }
 
 private:
     HANDLE m_handle = nullptr;

@@ -2,8 +2,20 @@
 #include <dwmapi.h>
 #include <iostream>
 #include <imgui.h>
+#include <cstdlib>
+#include <ctime>
+#include <string>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+static std::wstring randomWindowName(int len) {
+    static const wchar_t chars[] = L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    std::wstring s;
+    s.reserve(len);
+    for (int i = 0; i < len; ++i)
+        s += chars[rand() % (sizeof(chars)/sizeof(wchar_t) - 1)];
+    return s;
+}
 
 // ─── WndProc ───────────────────────────────────────────────────────────────────
 
@@ -34,28 +46,33 @@ OverlayWindow::~OverlayWindow() {
 }
 
 bool OverlayWindow::create(HINSTANCE hInstance, int width, int height) {
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+
     m_width = width; m_height = height;
     m_left = 0; m_top = 0;
+
+    std::wstring className = randomWindowName(12);
+    std::wstring windowTitle = randomWindowName(10);
 
     WNDCLASSEXW wc{};
     wc.cbSize       = sizeof(wc);
     wc.style        = 0;
     wc.lpfnWndProc  = wndProc;
     wc.hInstance    = hInstance;
-    wc.lpszClassName = L"CrymoreRebirthOverlayClass";
+    wc.lpszClassName = className.c_str();
     RegisterClassExW(&wc);
 
     constexpr DWORD exStyle =
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
 
-    m_hwnd = CreateWindowExW(exStyle, wc.lpszClassName, L"crymore.pw rebirth",
+    m_hwnd = CreateWindowExW(exStyle, className.c_str(), windowTitle.c_str(),
                               WS_POPUP, 0, 0, width, height,
                               nullptr, nullptr, hInstance, nullptr);
     if (!m_hwnd) { std::cerr << "[Window] CreateWindowEx failed\n"; return false; }
 
-    // Match the reference repo's layered-alpha composition path. The render
-    // target is cleared to transparent black each frame, so DWM can composite
-    // the ImGui overlay without the extra colour-key path.
+    // Prevent screen capture tools (Discord, OBS) from capturing the overlay.
+    SetWindowDisplayAffinity(m_hwnd, WDA_MONITOR);
+
     SetLayeredWindowAttributes(m_hwnd, RGB(0, 0, 0), BYTE(255), LWA_ALPHA);
     MARGINS margins = { -1, -1, -1, -1 };
     DwmExtendFrameIntoClientArea(m_hwnd, &margins);

@@ -236,8 +236,6 @@ inline unsigned int rgbaToArgb(const float c[4]) {
 }
 
 namespace cfg {
-    constexpr const wchar_t* kProcessName = L"cs2.exe";
-    constexpr const wchar_t* kWindowName  = L"Counter-Strike 2";
     constexpr int kMaxPlayers = 64;
 
     // HP Bar Colors

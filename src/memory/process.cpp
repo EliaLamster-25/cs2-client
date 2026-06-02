@@ -48,10 +48,21 @@ bool Process::attach(const std::wstring& processName) {
 }
 
 void Process::detach() {
+    closeHandle();
+    m_pid = 0;
+}
+
+bool Process::openHandle() {
+    closeHandle();
+    if (!m_pid) return false;
+    m_handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, m_pid);
+    return m_handle != nullptr;
+}
+
+void Process::closeHandle() {
     if (m_handle) {
         CloseHandle(m_handle);
         m_handle = nullptr;
-        m_pid    = 0;
     }
 }
 

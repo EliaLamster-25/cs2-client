@@ -2,8 +2,10 @@
 #include <iostream>
 #include <thread>
 #include <atomic>
+#include <string>
 
 #include "config.h"
+#include "str_obf.h"
 #include "memory/process.h"
 #include "overlay/window.h"
 #include "overlay/renderer.h"
@@ -12,8 +14,14 @@
 #include "game/aim_assist.h"
 #include "esp/esp_renderer.h"
 #include "menu/menu.h"
-#include "web/web_radar_publisher.h"
 #include "analytics/match_intel.h"
+#include "web/web_radar_publisher.h"
+
+// XOR-obfuscated critical strings at runtime — prevent static signatures.
+static const std::wstring kCs2Exe = OBFW("c|2/|1|", 0xAB);
+static const std::wstring kCs2Window = OBFW("\xae\xaf\xb6\xbe\xb4\xb3\xbe\xd0\xb0\xb6\xb0\xb7\xde\xbc\xb7\xb6\xb0\xde\xb9\xb5\xbe\xb0\xad\xb4\xb6\xb7\xb8\xb0\xd0\xb4\xb0\xb9\xb8\xb4\xb6\xb0\xd1\xb2\xb6\xb7\xb0\xb9\xb3\xb4\xb2\xb0\xd4\xd7", 0xAB);
+static const std::wstring kClientDll = OBFW("\xad\xa2\xb0\x9e\xbe\xb2\xb6\xd1\xb7\xa2\xa2", 0xAB);
+static const std::wstring kEngine2Dll = OBFW("\x9f\xb6\xb3\xb0\xb0\xb6\xd7\xb7\xa2\xa2", 0xAB);
 
 static void tapKey(WORD vk) {
     INPUT inputs[2]{};
@@ -56,12 +64,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     std::clog.clear();
     std::cerr.clear();
 
-    std::cout << "=== crymore.pw rebirth ===\n\n";
-
     // ── 1. Attach to cs2.exe ───────────────────────────────────────────────────
     Process proc;
-    std::cout << "[Main] Waiting for " << "cs2.exe" << "...\n";
-    while (!proc.attach(cfg::kProcessName)) {
+    std::cout << "[Main] Waiting for cs2.exe...\n";
+    while (!proc.attach(kCs2Exe)) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
@@ -72,8 +78,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         return 1;
     }
 
+    // Close the initial attach handle; entity thread will open per-cycle.
+    proc.closeHandle();
+
     // ── 3. Find the game window ────────────────────────────────────────────────
-    HWND gameWindow = FindWindowW(nullptr, cfg::kWindowName);
+    HWND gameWindow = FindWindowW(nullptr, kCs2Window.c_str());
     if (!gameWindow) {
         std::cerr << "[Main] Could not find game window '"
                   << "Counter-Strike 2" << "'\n";
@@ -167,6 +176,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
                     kUpdateInterval = (std::max)(kUpdateInterval, std::chrono::milliseconds(100));
             }
 
+            // Open process handle for this update cycle, close when done.
+            if (!proc.openHandle()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
             auto t0 = std::chrono::steady_clock::now();
             entityMgr.update(proc);
             MatchIntel::instance().update(entityMgr.snapshot());
@@ -174,6 +188,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
             if (g_cfg.aimAssistEnabled)
                 aimAssist.update(proc, entityMgr);
             webRadar.update(proc, entityMgr);
+            proc.closeHandle();
             auto elapsed = std::chrono::steady_clock::now() - t0;
             auto us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
             perf.totalUs += us;

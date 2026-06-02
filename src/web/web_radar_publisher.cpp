@@ -424,7 +424,7 @@ bool WebRadarPublisher::postSnapshot(const std::string& payloadJson) {
 
     auto ensureConnection = [&]() -> bool {
         if (!hSession) {
-            hSession = WinHttpOpen(L"AG-CS2-WebRadar/1.0",
+            hSession = WinHttpOpen(L"Mozilla/5.0",
                                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                    WINHTTP_NO_PROXY_NAME,
                                    WINHTTP_NO_PROXY_BYPASS,
