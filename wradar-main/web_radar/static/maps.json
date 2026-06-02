@@ -1,0 +1,72 @@
+{
+    "maps": [
+        {
+            "map_name": "cs_italy",
+            "pos_x": -2647,
+	        "pos_y": 2592,
+	        "scale": 4.6 
+        },
+        {
+            "map_name": "cs_office",
+            "pos_x": -1838,
+	        "pos_y": 1858,
+	        "scale": 4.1 
+        },
+        {
+            "map_name": "de_ancient",
+            "pos_x": -2953,
+	        "pos_y": 2164,
+	        "scale": 5 
+        },
+        {
+            "map_name": "de_anubis",
+            "pos_x": -2796,
+	        "pos_y": 3328,
+	        "scale": 5.22 
+        },
+        {
+            "map_name": "de_dust2",
+            "pos_x": -2476,
+	        "pos_y": 3239,
+	        "scale": 4.4 
+        },
+        {
+            "map_name": "de_inferno",
+            "pos_x": -2087,
+	        "pos_y": 3870,
+	        "scale": 4.9
+        },
+        {
+            "map_name": "de_mirage",
+            "pos_x": -3230,
+	        "pos_y": 1713,
+	        "scale": 5 
+        },
+        {
+            "map_name": "de_nuke",
+            "pos_x": -3453,
+	        "pos_y": 2887,
+	        "scale": 7
+        },
+        {
+            "map_name": "de_overpass",
+            "pos_x": -4831,
+	        "pos_y": 1781,
+	        "scale": 5.2
+        },
+        {
+            "map_name": "de_vertigo",
+            "pos_x": -3168,
+	        "pos_y": 1762,
+	        "scale": 4
+        },
+        {
+            "map_name": "de_jura",
+            "pos_x": -2163,
+	        "pos_y": 2390,
+	        "scale": 2.5,
+            "AltitudeMax": 16384,
+            "AltitudeMin": -16384
+        }
+    ]
+}

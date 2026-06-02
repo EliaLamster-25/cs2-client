@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build Overlay",
+			"type": "shell",
+			"command": "$msbuild = Get-ChildItem -Path 'C:\\Program Files\\Microsoft Visual Studio' -Recurse -Filter MSBuild.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName; if (-not $msbuild) { throw 'MSBuild.exe not found under Visual Studio install' }; & $msbuild 'c:\\Users\\miste\\Downloads\\AG Cs2\\build\\cs2_overlay.slnx' /p:Configuration=Release /t:cs2_overlay /m /v:minimal",
+			"isBackground": false,
+			"group": "build"
+		}
+	]
+}

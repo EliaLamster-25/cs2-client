@@ -1,0 +1,32 @@
+# --- Node / Svelte ---
+node_modules
+dist
+build
+.env
+*.local
+
+# --- Visual Studio ---
+# User-specific
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio working files
+.vs/
+Generated Files/
+
+# Others
+*.log

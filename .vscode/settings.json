@@ -1,0 +1,4 @@
+{
+  "cmake.buildType": "Release",
+  "cmake.configureOnOpen": true
+}
