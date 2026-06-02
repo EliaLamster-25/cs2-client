@@ -1400,8 +1400,8 @@ void Menu::drawSidebar() {
     } else {
         drawBrandMark(r, x + S(18.f), y + S(18.f), c);
     }
-    r.drawText(f, x + S(66.f), y + S(17.f), "Overlay", Theme::TEXT, C(16.f));
-    r.drawText(f, x + S(66.f), y + S(35.f), "v1.0", Theme::TEXT_MUTED, C(13.f));
+    r.drawText(f, x + S(66.f), y + S(17.f), "crymore.pw", Theme::TEXT, C(16.f));
+    r.drawText(f, x + S(66.f), y + S(35.f), "rebirth", Theme::TEXT_MUTED, C(13.f));
 
     float startY = y + S(80.f);
     auto tabYForIndex = [&](int index) {
