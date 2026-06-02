@@ -492,7 +492,7 @@ bool EntityManager::init(const Process& proc) {
                       << m_cs2Path << '\n';
         }
     }
-    m_clientBase = proc.getModuleBase(OBFW("\xad\xa2\xb0\x9e\xbe\xb2\xb6\xd1\xb7\xa2\xa2", 0xAB));
+    m_clientBase = proc.getModuleBase(OBFW("\xC8\xC7\xC2\xCE\xC5\xDF\x85\xCF\xC7\xC7", 0xAB));
     if (!m_clientBase) {
         std::cerr << "[EntityManager] client.dll not found!\n";
         return false;
@@ -500,7 +500,7 @@ bool EntityManager::init(const Process& proc) {
     std::cout << "[EntityManager] client.dll @ 0x"
               << std::hex << m_clientBase << std::dec << '\n';
 
-    m_engine2Base = proc.getModuleBase(OBFW("\x9f\xb6\xb3\xb0\xb0\xb6\xd7\xb7\xa2\xa2", 0xAB));
+    m_engine2Base = proc.getModuleBase(OBFW("\xCE\xC5\xCC\xC2\xC5\xCE\x99\x85\xCF\xC7\xC7", 0xAB));
     if (m_engine2Base)
         std::cout << "[EntityManager] engine2.dll @ 0x"
                   << std::hex << m_engine2Base << std::dec << '\n';
