@@ -535,7 +535,6 @@ static json configToJson(const OverlayConfig& cfg) {
     j["hpTextEnabled"] = cfg.hpTextEnabled;
     j["hpTextVisibleEnabled"] = cfg.hpTextVisibleEnabled;
     j["hpTextOccludedEnabled"] = cfg.hpTextOccludedEnabled;
-    j["showDormant"] = cfg.showDormant;
     j["enemyOnly"] = cfg.enemyOnly;
     j["nameEspEnabled"] = cfg.nameEspEnabled;
     j["armorEspEnabled"] = cfg.armorEspEnabled;
@@ -636,7 +635,6 @@ static json configToJson(const OverlayConfig& cfg) {
     j["bombTimerEnabled"] = cfg.bombTimerEnabled;
     j["spectatorListEnabled"] = cfg.spectatorListEnabled;
     j["radarEnabled"] = cfg.radarEnabled;
-    j["voteRevealerEnabled"] = cfg.voteRevealerEnabled;
     j["webRadarEnabled"] = cfg.webRadarEnabled;
     j["webRadarPublishMs"] = cfg.webRadarPublishMs;
     j["radarMode"] = cfg.radarMode;
@@ -678,7 +676,6 @@ static json configToJson(const OverlayConfig& cfg) {
     j["bombTimerPosX"] = cfg.bombTimerPosX;
     j["bombTimerPosY"] = cfg.bombTimerPosY;
 
-    j["debugConsole"] = cfg.debugConsole;
     return j;
 }
 
@@ -695,7 +692,6 @@ static void applyJsonToConfig(const json& j, OverlayConfig& cfg) {
     setBool("hpTextEnabled", cfg.hpTextEnabled);
     setBool("hpTextVisibleEnabled", cfg.hpTextVisibleEnabled);
     setBool("hpTextOccludedEnabled", cfg.hpTextOccludedEnabled);
-    setBool("showDormant", cfg.showDormant);
     setBool("enemyOnly", cfg.enemyOnly);
     setBool("nameEspEnabled", cfg.nameEspEnabled);
     setBool("armorEspEnabled", cfg.armorEspEnabled);
@@ -926,7 +922,6 @@ static void applyJsonToConfig(const json& j, OverlayConfig& cfg) {
     setBool("bombTimerEnabled", cfg.bombTimerEnabled);
     setBool("spectatorListEnabled", cfg.spectatorListEnabled);
     setBool("radarEnabled", cfg.radarEnabled);
-    setBool("voteRevealerEnabled", cfg.voteRevealerEnabled);
     setBool("webRadarEnabled", cfg.webRadarEnabled);
     setInt("webRadarPublishMs", cfg.webRadarPublishMs);
     setInt("radarMode", cfg.radarMode);
@@ -1016,8 +1011,6 @@ static void applyJsonToConfig(const json& j, OverlayConfig& cfg) {
     setFloat("menuPosY", cfg.menuPosY);
     setFloat("bombTimerPosX", cfg.bombTimerPosX);
     setFloat("bombTimerPosY", cfg.bombTimerPosY);
-
-    setBool("debugConsole", cfg.debugConsole);
 }
 
 static bool writeConfigFile(const std::filesystem::path& path, const OverlayConfig& cfg) {
@@ -2979,7 +2972,6 @@ void Menu::drawVisualsPanel() {
     m_gui.toggleCheckbox("grenTraj", "Grenade Trajectory", &g_cfg.grenadeTrajectory);
     m_gui.toggleCheckbox("bombTimer", "Bomb Timer", &g_cfg.bombTimerEnabled);
     m_gui.toggleCheckbox("specList", "Spectator List", &g_cfg.spectatorListEnabled);
-    m_gui.toggleCheckbox("voteReveal", "Vote Revealer", &g_cfg.voteRevealerEnabled);
     m_gui.toggleCheckbox("radarEn", "Radar", &g_cfg.radarEnabled);
     m_gui.label("Radar Mode", Theme::TEXT_MUTED, 14.f);
     static const char* kRadarModes[] = {
@@ -3095,7 +3087,6 @@ void Menu::drawExtraPanel() {
     }
     m_gui.label("Time Critical can improve responsiveness but uses more CPU.", Theme::TEXT_MUTED, 12.f);
     m_gui.separator();
-    m_gui.toggleCheckbox("debugCon", "Debug Console", &g_cfg.debugConsole);
 }
 
 void Menu::drawIntelPanel() {

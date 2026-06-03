@@ -172,9 +172,7 @@ void EspRenderer::render(Renderer& r, const EntityManager& em) {
     const bool renderBomb = g_cfg.bombTimerEnabled;
     const bool renderSpectatorList = g_cfg.spectatorListEnabled;
     const bool renderRadar = g_cfg.espEnabled && g_cfg.radarEnabled;
-    const bool renderVoteRevealer = g_cfg.voteRevealerEnabled;
-
-    if (!renderPlayers && !renderGrenades && !renderBomb && !renderSpectatorList && !renderRadar && !renderVoteRevealer)
+    if (!renderPlayers && !renderGrenades && !renderBomb && !renderSpectatorList && !renderRadar)
         return;
 
     r.setImGuiDrawMode(true);
@@ -239,9 +237,6 @@ void EspRenderer::render(Renderer& r, const EntityManager& em) {
         drawSpectators(r, snap);
     if (renderRadar)
         drawRadar(r, snap);
-    if (renderVoteRevealer)
-        drawVoteRevealer(r);
-
     r.setImGuiDrawMode(false);
 }
 
@@ -764,20 +759,6 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
         }
     }
 }
-void EspRenderer::drawVoteRevealer(Renderer& r) {
-    const float x = 26.f;
-    const float y = static_cast<float>(r.screenHeight()) * 0.68f;
-    const float w = 340.f;
-    const float h = 60.f;
-
-    r.drawRoundedFilledRect(x, y, w, h, 0xDD10131B, 10.f);
-    r.drawRoundedRect(x, y, w, h, 0xFF2F364A, 10.f, 1.f);
-    if (!m_font)
-        return;
-    r.drawTextW(*m_font, x + 12.f, y + 10.f, L"Vote Revealer Enabled", 0xFFE9ECFF, 15.f);
-    r.drawTextW(*m_font, x + 12.f, y + 32.f, L"No vote netvars in current offsets set", 0xFF9EA5C4, 13.f);
-}
-
 // ─── Pick player colour based on visibility state ─────────────────────────────
 
 /// Returns the RGBA colour array for a player, choosing visible/occluded/dormant

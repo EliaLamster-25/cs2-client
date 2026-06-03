@@ -152,12 +152,9 @@ bool hasLineOfSight(const BspWorld& world, const Vec3& eye, const Vec3& target, 
     dir = dir * (1.f / len);
     const Vec3 start = eye + dir * 2.0f;
 
-    float tHit = 1.f;
-    Vec3 nHit{};
-    if (!world.sweep(start, target, tHit, nHit))
-        return true;
-
-    return tHit >= 0.995f;
+    // Use any-hit sweep — early exits on first blocking geometry,
+    // orders of magnitude faster than closest-hit sweep for visibility checks.
+    return !world.sweepAny(start, target);
 }
 
 int collectVisibilitySamples(const PlayerData& p, int mode, Vec3* out, int cap) {
@@ -170,23 +167,19 @@ int collectVisibilitySamples(const PlayerData& p, int mode, Vec3* out, int cap) 
             out[n++] = v;
     };
 
-    push(p.headPos);
-
-    Vec3 chest = p.origin + Vec3{ 0.f, 0.f, 54.f };
-    push(chest);
+    // Reduced sample counts for performance: Fast=1, Balanced=2, Strict=3
+    // (was Fast=2, Balanced=3, Strict=7 — the brush spatial grid makes per-sweep
+    //  cost negligible, but fewer sweeps still saves proportional time.)
+    push(p.headPos);  // always check the head
 
     if (mode >= 1) {
-        Vec3 pelvis = p.origin + Vec3{ 0.f, 0.f, 34.f };
-        push(pelvis);
+        Vec3 chest = p.origin + Vec3{ 0.f, 0.f, 54.f };
+        push(chest);
     }
 
-    if (mode >= 2 && p.bonesValid) {
-        const float yawRad = p.eyeYaw * (3.14159265f / 180.f);
-        const Vec3 right{ -std::sinf(yawRad), std::cosf(yawRad), 0.f };
-        push(chest + right * 10.f);
-        push(p.bones[bone_slot::chest]);
-        push(p.bones[bone_slot::head]);
-        push(p.bones[bone_slot::lKnee]);
+    if (mode >= 2) {
+        Vec3 pelvis = p.origin + Vec3{ 0.f, 0.f, 34.f };
+        push(pelvis);
     }
 
     return n;
@@ -1146,9 +1139,6 @@ void EntityManager::update(const Process& proc) {
             : ((mode == 0) ? 0.20f : ((mode == 1) ? 0.34f : 0.50f));
 
         // Guard: check if local eye is inside wall geometry once per frame.
-        // Uses view direction (extracted from the view matrix) so the result is
-        // independent of target direction.  This replaces the per-sample guard in
-        // hasLineOfSight — saves 1 BSP sweep per sample per player.
         bool eyeInsideWall = false;
         if (m_bspWorld.isLoaded() && hasLocalEye) {
             constexpr float kGuardLen = 30.f;
@@ -1164,15 +1154,12 @@ void EntityManager::update(const Process& proc) {
             }
         }
 
-        const auto visStart = std::chrono::steady_clock::now();
-
         for (std::size_t i = 0; i < tmpPlayers.size(); ++i) {
             auto& p = tmpPlayers[i];
             auto& visPersist = m_visibilityPersist[i];
             if (!p.isValid || !p.isAlive || p.isLocalPlayer || p.isDormant)
                 continue;
 
-            // Aim-only visibility is used to filter aimbot targets, so skip teammates here.
             if (aimOnlyVis && (p.teamNum == 0 || p.teamNum == tmpLocalTeam))
                 continue;
 
@@ -1200,59 +1187,53 @@ void EntityManager::update(const Process& proc) {
                 continue;
             }
 
-            // Cap visibility BSP sweeps at budget ms total; remaining players use cached latched value.
-            {
-                const auto kVisBudget = std::chrono::microseconds(g_cfg.visBudgetMs * 1000);
-                if (std::chrono::steady_clock::now() - visStart > kVisBudget) {
-                    if (visPersist.hasState) {
-                        p.visibilityChecked = true;
-                        p.isVisible = visPersist.latchedVisible;
-                        p.visibilityConfidence = visPersist.smoothedConfidence;
-                    }
-                    continue;
-                }
-            }
-
+            // Round-robin evaluation: each player is assigned to a subset of frames
+            // via (visTick % evalStride == playerIdx % evalStride).  This distributes
+            // the sweep workload evenly across frames without an arbitrary time budget
+            // that abandons players mid-frame (the old budget cap caused choppiness).
             int evalStride = 1;
             if (g_cfg.visEvalBase > 0) {
                 evalStride = std::clamp(g_cfg.visEvalBase, 1, 5);
             } else {
-                if (distSq > (3500.f * 3500.f)) evalStride = 3;
-                else if (distSq > (1600.f * 1600.f)) evalStride = 2;
+                // Stagger based on distance: close=every frame, far=every 2nd/3rd.
+                if (distSq > (5000.f * 5000.f)) evalStride = 4;
+                else if (distSq > (2500.f * 2500.f)) evalStride = 2;
             }
 
             if (!p.screenRelevant && !(g_cfg.aimAssistEnabled && g_cfg.aimRequireVisibility))
-                evalStride = (std::max)(evalStride, 5);
+                evalStride = (std::max)(evalStride, 6);
 
             if (aimOnlyVis) {
                 if (aimVisMode == 1) {
                     if (distSq <= (2600.f * 2600.f)) evalStride = 1;
                     else if (distSq <= (7000.f * 7000.f)) evalStride = 2;
-                    else evalStride = 2;
+                    else evalStride = 3;
                     if (!p.screenRelevant)
-                        evalStride = (std::max)(evalStride, 2);
+                        evalStride = (std::max)(evalStride, 3);
                 } else {
                     if (distSq <= (1700.f * 1700.f)) evalStride = 1;
                     else if (distSq <= (3600.f * 3600.f)) evalStride = 2;
                     else evalStride = 3;
                     if (!p.screenRelevant)
-                        evalStride = (std::max)(evalStride, 4);
+                        evalStride = (std::max)(evalStride, 5);
                 }
             }
 
             if (mode == 2)
                 evalStride = (std::max)(1, evalStride - 1);
 
-            const bool shouldEvalNow = !visPersist.hasState || (visTick >= visPersist.nextEvalTick);
-            if (!shouldEvalNow) {
-                p.visibilityChecked = true;
-                p.isVisible = visPersist.latchedVisible;
-                p.visibilityConfidence = visPersist.smoothedConfidence;
-                continue;
+            // Round-robin: only evaluate this player on frames where the tick aligns.
+            if (visPersist.hasState) {
+                const int playerSlot = static_cast<int>(i);
+                if ((visTick % evalStride) != (playerSlot % evalStride)) {
+                    p.visibilityChecked = true;
+                    p.isVisible = visPersist.latchedVisible;
+                    p.visibilityConfidence = visPersist.smoothedConfidence;
+                    continue;
+                }
             }
 
             if (aimOnlyVis && aimOnlyRayBudget <= 0) {
-                // Out of LOS budget this frame: prefer conservative fallback over stale true.
                 p.visibilityChecked = true;
                 if (visPersist.hasState) {
                     p.isVisible = visPersist.latchedVisible;
@@ -1261,30 +1242,22 @@ void EntityManager::update(const Process& proc) {
                     p.isVisible = false;
                     p.visibilityConfidence = 0.f;
                 }
-                visPersist.nextEvalTick = visTick + 1;
                 continue;
             }
 
-            Vec3 samples[8]{};
+            Vec3 samples[4]{};
             int sampleCount = 0;
             if (aimOnlyVis) {
                 samples[0] = p.headPos;
                 samples[1] = p.origin + Vec3{ 0.f, 0.f, 50.f };
                 if (aimVisMode == 1) {
                     samples[2] = p.origin + Vec3{ 0.f, 0.f, 34.f };
-                    if (p.bonesValid) {
-                        samples[3] = p.bones[5];
-                        samples[4] = p.bones[2];
-                        sampleCount = 5;
-                    } else {
-                        samples[3] = p.origin + Vec3{ 0.f, 0.f, 64.f };
-                        sampleCount = 4;
-                    }
+                    sampleCount = 3;
                 } else {
                     sampleCount = 2;
                 }
             } else {
-                sampleCount = collectVisibilitySamples(p, mode, samples, 8);
+                sampleCount = collectVisibilitySamples(p, mode, samples, 4);
             }
             if (sampleCount <= 0) {
                 if (visPersist.hasState) {
@@ -1306,10 +1279,8 @@ void EntityManager::update(const Process& proc) {
                 if (hasLineOfSight(m_bspWorld, tmpLocalEye, samples[sampleIdx], eyeInsideWall))
                     ++visibleHits;
 
-                // Early-out once visibility is already proven.
                 if (visibleHits >= minHits)
                     break;
-                // Early-out once threshold is no longer reachable.
                 const int remaining = sampleCount - (sampleIdx + 1);
                 if ((visibleHits + remaining) < minHits)
                     break;
@@ -1332,7 +1303,6 @@ void EntityManager::update(const Process& proc) {
                 visPersist.hasState = true;
                 visPersist.visibleStreak = rawVisible ? 1 : 0;
                 visPersist.occludedStreak = rawVisible ? 0 : 1;
-                visPersist.nextEvalTick = visTick + evalStride;
                 p.isVisible = visPersist.latchedVisible;
                 continue;
             }
@@ -1354,7 +1324,6 @@ void EntityManager::update(const Process& proc) {
             }
 
             visPersist.hasState = true;
-            visPersist.nextEvalTick = visTick + evalStride;
             p.isVisible = visPersist.latchedVisible;
         }
     } else {

@@ -5,7 +5,6 @@
 #include "memory/rpm.h"
 #include "config.h"
 #include <Windows.h>
-#include <thread>
 #include <chrono>
 #include <algorithm>
 #include <cctype>
@@ -105,10 +104,6 @@ void Triggerbot::update(const Process& proc, const EntityManager& em) {
     if (triggerKey != 0 && !(GetAsyncKeyState(triggerKey) & 0x8000))
         return;
 
-    // Only one shot cycle at a time (includes the per-shot cooldown sleep).
-    if (m_firing.load(std::memory_order_relaxed))
-        return;
-
     // ── Entity index under the crosshair (0 = nothing) ───────────────────────
     int crosshairId = mem::read<int>(proc, localPawn + netvars::pawn::m_iIDEntIndex);
     if (crosshairId <= 0) return;
@@ -135,24 +130,17 @@ void Triggerbot::update(const Process& proc, const EntityManager& em) {
         return;
 
     // ── Fire ─────────────────────────────────────────────────────────────────
-    // Set the flag first so concurrent 60 Hz calls don't double-fire.
-    m_firing.store(true, std::memory_order_relaxed);
-
+    // Rate-limit trigger pulls using a wall-clock cooldown.
+    const auto now = std::chrono::steady_clock::now();
     const int delayMs = (std::max)(0, (std::min)((aimCfg.triggerDelayMs > 0 ? aimCfg.triggerDelayMs : g_cfg.triggerbotDelayMs), 100));
-    std::thread([this, delayMs]() {
-        // Optional pre-fire delay (makes the bot less robotic).
-        if (delayMs > 0)
-            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+    if (now - m_lastFireTime < std::chrono::milliseconds(delayMs))
+        return;
+    m_lastFireTime = now;
 
-        INPUT inputs[2]{};
-        inputs[0].type       = INPUT_MOUSE;
-        inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-        inputs[1].type       = INPUT_MOUSE;
-        inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-        SendInput(2, inputs, sizeof(INPUT));
-
-        // Cooldown: prevents re-triggering faster than the weapon's fire rate.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        m_firing.store(false, std::memory_order_relaxed);
-    }).detach();
+    INPUT inputs[2]{};
+    inputs[0].type       = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    inputs[1].type       = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    SendInput(2, inputs, sizeof(INPUT));
 }

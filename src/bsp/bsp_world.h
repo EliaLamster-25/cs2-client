@@ -64,6 +64,14 @@ public:
     //   norm   : outward surface normal at impact
     bool sweep(const Vec3& a, const Vec3& b, float& t_hit, Vec3& norm) const;
 
+    // Fast any-hit sweep for visibility (line-of-sight) queries.
+    // Returns true as soon as ANY solid is hit — does NOT search for closest.
+    // Much faster than sweep() when the ray is blocked by nearby geometry.
+    bool sweepAny(const Vec3& a, const Vec3& b) const;
+
+    // Per-frame sweep ID for brush grid deduplication (thread-safe via thread_local).
+    static uint32_t& sweepCounter();
+
 private:
     bool        m_loaded = false;
     std::string m_mapName;
@@ -78,17 +86,41 @@ private:
     // Spatial hash: packed (cx, cy) cell key -> indices into m_tris.
     // Cell size = kTriGridCell units in XY; covers all triangles in a 2D grid.
     std::unordered_map<int64_t, std::vector<uint32_t>>  m_triGrid;
-    static constexpr float kTriGridCell = 256.f;
+
+    // Spatial hash for brushes: packed (cx, cy) cell key -> brush indices.
+    // Cell size = 512 units (brushes are larger than triangles).
+    std::unordered_map<int64_t, std::vector<uint32_t>>  m_brushGrid;
+    static constexpr float kBrushGridCell = 512.f;
 
     // Rebuilds m_triGrid from current contents of m_tris.
     void buildTriGrid();
+
+    // Rebuilds m_brushGrid from current contents of m_brushes.
+    void buildBrushGrid();
 
     // Per-brush convex sweep using enter/exit parametric tracking.
     bool sweepBrush(const Vec3& a, const Vec3& b,
                     const BspBrush& br,
                     float& t_out, Vec3& n_out) const;
 
-    // Sweep segment [a→b] (sphere radius 5) against extracted mesh triangles.
+    // Sweep segment [a→b] (sphere radius kSphereR) against extracted mesh triangles.
     bool sweepTris(const Vec3& a, const Vec3& b,
                    float& t_hit, Vec3& norm) const;
+
+    // Any-hit variant: returns true immediately when first blocking triangle is found.
+    // Uses per-sweep triangle dedup (visitId) to avoid re-checking triangles that
+    // span multiple spatial grid cells.
+    bool sweepTrisAny(const Vec3& a, const Vec3& b, uint32_t visitId) const;
+
+    // Per-sweep triangle dedup storage (thread_local for thread safety).
+    static std::vector<uint32_t>& triVisited();
+
+    // Cell size for the triangle spatial grid (exposed for the internal sweep helper).
+    static constexpr float kTriGridCell = 256.f;
+
+    // Shared triangle-sweep implementation with per-sweep dedup via visitId.
+    // When anyHit=true, returns immediately on first blocking triangle.
+    bool sweepTrisInternal(const Vec3& a, const Vec3& b,
+                           float& t_hit, Vec3& norm,
+                           uint32_t visitId, bool anyHit) const;
 };

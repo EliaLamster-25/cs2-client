@@ -134,7 +134,7 @@ void WebRadarPublisher::update(const Process& proc, const EntityManager& em) {
     }
 
     const int configuredPublishMs = (std::max)(1, g_cfg.webRadarPublishMs);
-    const int effectivePublishMs = (std::min)(configuredPublishMs, 16);
+    const int effectivePublishMs = (std::min)(configuredPublishMs, 33);
     const std::uint64_t publishInterval = static_cast<std::uint64_t>(effectivePublishMs);
     const std::uint64_t t = nowMs();
     if (m_lastPublishMs != 0 && (t - m_lastPublishMs) < publishInterval)
@@ -221,8 +221,8 @@ void WebRadarPublisher::update(const Process& proc, const EntityManager& em) {
 
         if (!g.isDeployed && g.predCount > 1) {
             json pts = json::array();
-            constexpr int kMaxGrenadePredPoints = 56;
-            const int sampleStep = (g.predCount > 120) ? 3 : 2;
+            constexpr int kMaxGrenadePredPoints = 32;
+            const int sampleStep = (g.predCount > 160) ? 4 : (g.predCount > 80) ? 3 : 2;
             for (int i = 0; i < g.predCount && static_cast<int>(pts.size()) < kMaxGrenadePredPoints; i += sampleStep) {
                 pts.push_back({
                     { "x", g.predPoints[i].x },
@@ -246,8 +246,8 @@ void WebRadarPublisher::update(const Process& proc, const EntityManager& em) {
     const auto preThrow = em.preThrow();
     if (preThrow.isActive && preThrow.predCount > 1) {
         json pts = json::array();
-        constexpr int kMaxPreThrowPoints = 80;
-        const int sampleStep = (preThrow.predCount > 160) ? 3 : 2;
+        constexpr int kMaxPreThrowPoints = 48;
+        const int sampleStep = (preThrow.predCount > 200) ? 4 : (preThrow.predCount > 100) ? 3 : 2;
         for (int i = 0; i < preThrow.predCount && static_cast<int>(pts.size()) < kMaxPreThrowPoints; i += sampleStep) {
             pts.push_back({
                 { "x", preThrow.predPoints[i].x },

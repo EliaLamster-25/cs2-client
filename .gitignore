@@ -35,3 +35,6 @@ assets/
 *.swp
 *.swo
 *~
+
+# Windows reserved device name
+nul

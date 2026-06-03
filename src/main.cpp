@@ -55,13 +55,16 @@ static void tapKey(WORD vk) {
 ///   6. Clean up on exit (ESC / WM_QUIT).
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+#ifdef _DEBUG
     // ── Anti-debug: if a debugger is present, die immediately.
     if (IsDebuggerPresent()) __fastfail(1);
+#endif
 
     // ── 0. Fix DPI Scaling (Removes pixelation/blurriness) ───────────────
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    // ── Allocate a console for debug output ──────────────────────────────
+    // ── Console: only in debug builds ─────────────────────────────────────
+#ifdef _DEBUG
     AllocConsole();
     FILE* fDummy;
     freopen_s(&fDummy, "CONOUT$", "w", stdout);
@@ -69,6 +72,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     std::cout.clear();
     std::clog.clear();
     std::cerr.clear();
+#endif
 
     // ── 1. Attach to cs2.exe ───────────────────────────────────────────────────
     Process proc;
@@ -150,7 +154,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
                 int prio = THREAD_PRIORITY_NORMAL;
                 if (lastThrPrio == 1) prio = THREAD_PRIORITY_ABOVE_NORMAL;
                 else if (lastThrPrio == 2) prio = THREAD_PRIORITY_HIGHEST;
-                else if (lastThrPrio == 3) prio = THREAD_PRIORITY_TIME_CRITICAL;
+                else if (lastThrPrio == 3) prio = THREAD_PRIORITY_HIGHEST;
                 SetThreadPriority(GetCurrentThread(), prio);
             }
 
@@ -201,8 +205,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
             if (us > perf.maxUs) perf.maxUs = us;
             if (us > std::chrono::duration_cast<std::chrono::microseconds>(kUpdateInterval).count())
                 ++perf.overruns;
-            if (++perf.count == 300) {
-                std::printf("[EntityThread] avg=%lldus max=%lldus overrun=%d/300 budget=%lldus\n",
+            if (++perf.count == 600) {
+                std::printf("[EntityThread] avg=%lldus max=%lldus overrun=%d/600 budget=%lldus\n",
                     perf.totalUs / 300, perf.maxUs, perf.overruns,
                     (long long)std::chrono::duration_cast<std::chrono::microseconds>(kUpdateInterval).count());
                 perf = {};

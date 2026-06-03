@@ -82,7 +82,6 @@ struct OverlayConfig {
     bool flagDefusingEnabled = true;
     bool flagScopedEnabled   = true;
     bool flagDefuseKitEnabled = true;
-    bool showDormant         = false;
     bool enemyOnly           = false;
 
     // ── Box colours (ARGB) ─────────────────────────────────────────────────────
@@ -176,7 +175,6 @@ struct OverlayConfig {
     bool  bombTimerEnabled  = true;
     bool  spectatorListEnabled = true;
     bool  radarEnabled      = true;
-    bool  voteRevealerEnabled = false;
     bool  webRadarEnabled   = false;
     int   webRadarPublishMs = 15;
     std::string webRadarSessionId;
@@ -222,8 +220,6 @@ struct OverlayConfig {
     int   bgMode               = 0;  // 0=Full, 1=Reduced (slower when unfocused), 2=Minimal
     int   performanceProfile   = 1;  // 0=LAN, 1=Balanced, 2=Stream-safe
 
-// ── Debug ──────────────────────────────────────────────────────────────────
-    bool  debugConsole    = true;   // extra per-frame info in console
 };
 
 /// Global config instance — defined in config.cpp.
@@ -237,11 +233,4 @@ inline unsigned int rgbaToArgb(const float c[4]) {
 
 namespace cfg {
     constexpr int kMaxPlayers = 64;
-
-    // HP Bar Colors
-    constexpr unsigned int kHpBarBgColor = 0x80000000;
-    constexpr unsigned int kHpBarLowColor = 0xFFFF0000;
-    constexpr unsigned int kHpBarFullColor = 0xFF00FF00;
-    constexpr float kHpBarLowThreshold = 0.2f;
-    constexpr float kHpBarOutlinePx = 1.0f;
 }

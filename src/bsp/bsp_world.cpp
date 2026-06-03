@@ -276,6 +276,7 @@ bool BspWorld::load(const std::string& mapName, const std::string& cs2Path) {
         return false;
     }
 
+    buildBrushGrid();
     m_mapName = mapName;
     m_loaded  = true;
     return true;
@@ -288,6 +289,7 @@ void BspWorld::clear() {
     m_brushes.clear();
     m_tris.clear();
     m_triGrid.clear();
+    m_brushGrid.clear();
     m_loaded  = false;
     m_mapName.clear();
 }
@@ -317,6 +319,31 @@ void BspWorld::buildTriGrid() {
     }
     std::cout << "[MeshGrid] " << m_triGrid.size() << " cells for "
               << m_tris.size() << " triangles\n";
+}
+
+// ─── BspWorld::buildBrushGrid ────────────────────────────────────────────────
+// Rebuilds m_brushGrid from whatever is currently in m_brushes.
+// Uses AABB overlap (same approach as buildTriGrid) to insert each brush
+// into every cell its bounding box touches. Cell size = 512 units.
+void BspWorld::buildBrushGrid() {
+    m_brushGrid.clear();
+    for (uint32_t bi = 0; bi < static_cast<uint32_t>(m_brushes.size()); ++bi) {
+        const BspBrush& br = m_brushes[bi];
+        const int cx0 = static_cast<int>(std::floorf(br.mnX / kBrushGridCell));
+        const int cx1 = static_cast<int>(std::floorf(br.mxX / kBrushGridCell));
+        const int cy0 = static_cast<int>(std::floorf(br.mnY / kBrushGridCell));
+        const int cy1 = static_cast<int>(std::floorf(br.mxY / kBrushGridCell));
+        for (int cx = cx0; cx <= cx1; ++cx) {
+            for (int cy = cy0; cy <= cy1; ++cy) {
+                const int64_t key =
+                    (static_cast<int64_t>(static_cast<int32_t>(cx)) << 32)
+                    | static_cast<uint32_t>(static_cast<int32_t>(cy));
+                m_brushGrid[key].push_back(bi);
+            }
+        }
+    }
+    std::cout << "[BrushGrid] " << m_brushGrid.size() << " cells for "
+              << m_brushes.size() << " brushes\n";
 }
 
 // ─── BspWorld::loadTri ────────────────────────────────────────────────────────
@@ -363,6 +390,7 @@ bool BspWorld::loadTri(const std::string& triPath) {
               << " triangles from " << triPath << "\n";
 
     buildTriGrid();
+    // No brush grid needed — .tri files contain only triangle data.
     m_mapName = triPath;
     m_loaded  = true;
     return true;
@@ -1104,6 +1132,8 @@ bool BspWorld::loadFromVpk(const std::string& mapName,
     // Build spatial hash grid for triangle mesh queries.
     if (!m_tris.empty())
         buildTriGrid();
+    if (!m_brushes.empty())
+        buildBrushGrid();
 
     if (m_brushes.empty() && m_tris.empty()) return false;
 
@@ -1274,6 +1304,144 @@ bool BspWorld::sweepTris(const Vec3& a, const Vec3& b,
 }
 
 // ─── BspWorld::sweep ─────────────────────────────────────────────────────────
+uint32_t& BspWorld::sweepCounter() {
+    thread_local uint32_t counter = 0;
+    return counter;
+}
+
+std::vector<uint32_t>& BspWorld::triVisited() {
+    thread_local std::vector<uint32_t> v;
+    return v;
+}
+
+// Shared triangle-sweep implementation with per-sweep dedup via visitId.
+bool BspWorld::sweepTrisInternal(const Vec3& a, const Vec3& b,
+                                  float& t_hit, Vec3& norm,
+                                  uint32_t visitId, bool anyHit) const {
+    if (m_tris.empty()) return false;
+
+    const float dirX = b.x - a.x, dirY = b.y - a.y, dirZ = b.z - a.z;
+
+    const float smnX = std::min(a.x, b.x) - kSphereR;
+    const float smxX = std::max(a.x, b.x) + kSphereR;
+    const float smnY = std::min(a.y, b.y) - kSphereR;
+    const float smxY = std::max(a.y, b.y) + kSphereR;
+    const float smnZ = std::min(a.z, b.z) - kSphereR;
+    const float smxZ = std::max(a.z, b.z) + kSphereR;
+
+    const int cx0 = static_cast<int>(std::floorf(smnX / kTriGridCell));
+    const int cx1 = static_cast<int>(std::floorf(smxX / kTriGridCell));
+    const int cy0 = static_cast<int>(std::floorf(smnY / kTriGridCell));
+    const int cy1 = static_cast<int>(std::floorf(smxY / kTriGridCell));
+
+    // Per-sweep triangle dedup — prevents re-checking the same triangle across
+    // grid cells.  A single floor triangle can span hundreds of units and land in
+    // dozens of cells; without dedup it would be tested that many times per sweep.
+    std::vector<uint32_t>& visited = triVisited();
+    if (visited.size() < m_tris.size())
+        visited.resize(m_tris.size());
+
+    float bestT   = 2.f;
+    int   bestIdx = -1;
+
+    for (int cx = cx0; cx <= cx1; ++cx) {
+        for (int cy = cy0; cy <= cy1; ++cy) {
+            const int64_t key = (static_cast<int64_t>(static_cast<int32_t>(cx)) << 32)
+                              | static_cast<uint32_t>(static_cast<int32_t>(cy));
+            const auto it = m_triGrid.find(key);
+            if (it == m_triGrid.end()) continue;
+
+            for (uint32_t ti : it->second) {
+                if (visited[ti] == visitId) continue;  // dedup across cells
+                visited[ti] = visitId;
+
+                const MeshTri& tri = m_tris[ti];
+
+                const float triMnZ = std::min({ tri.p[0].z, tri.p[1].z, tri.p[2].z });
+                const float triMxZ = std::max({ tri.p[0].z, tri.p[1].z, tri.p[2].z });
+                if (triMxZ + kSphereR < smnZ || triMnZ - kSphereR > smxZ) continue;
+
+                const float dDotN = dirX * tri.n.x + dirY * tri.n.y + dirZ * tri.n.z;
+                if (dDotN >= -1e-6f) continue;
+
+                const float dA = (a.x - tri.p[0].x) * tri.n.x
+                               + (a.y - tri.p[0].y) * tri.n.y
+                               + (a.z - tri.p[0].z) * tri.n.z;
+                if (dA <= kSphereR) continue;
+
+                const float t = (dA - kSphereR) / (-dDotN);
+                if (t <= 0.f || t >= bestT) continue;
+
+                const float Px = a.x + t * dirX - tri.n.x * kSphereR;
+                const float Py = a.y + t * dirY - tri.n.y * kSphereR;
+                const float Pz = a.z + t * dirZ - tri.n.z * kSphereR;
+
+                // Inside-triangle test — three edge checks.
+                {
+                    float ex = tri.p[1].x - tri.p[0].x;
+                    float ey = tri.p[1].y - tri.p[0].y;
+                    float ez = tri.p[1].z - tri.p[0].z;
+                    float vx = Px - tri.p[0].x;
+                    float vy = Py - tri.p[0].y;
+                    float vz = Pz - tri.p[0].z;
+                    if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f)
+                        continue;
+                }
+                {
+                    float ex = tri.p[2].x - tri.p[1].x;
+                    float ey = tri.p[2].y - tri.p[1].y;
+                    float ez = tri.p[2].z - tri.p[1].z;
+                    float vx = Px - tri.p[1].x;
+                    float vy = Py - tri.p[1].y;
+                    float vz = Pz - tri.p[1].z;
+                    if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f)
+                        continue;
+                }
+                {
+                    float ex = tri.p[0].x - tri.p[2].x;
+                    float ey = tri.p[0].y - tri.p[2].y;
+                    float ez = tri.p[0].z - tri.p[2].z;
+                    float vx = Px - tri.p[2].x;
+                    float vy = Py - tri.p[2].y;
+                    float vz = Pz - tri.p[2].z;
+                    if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f)
+                        continue;
+                }
+
+                // For any-hit mode: return immediately on first blocking hit.
+                if (anyHit) {
+                    t_hit = t;
+                    norm  = tri.n;
+                    return true;
+                }
+
+                bestT   = t;
+                bestIdx = static_cast<int>(ti);
+            }
+        }
+    }
+
+    if (bestIdx >= 0) {
+        t_hit = bestT;
+        norm  = m_tris[bestIdx].n;
+        return true;
+    }
+    return false;
+}
+
+bool BspWorld::sweepTris(const Vec3& a, const Vec3& b,
+                          float& t_hit, Vec3& norm) const {
+    uint32_t& vid = sweepCounter();
+    ++vid;
+    return sweepTrisInternal(a, b, t_hit, norm, vid, false);
+}
+
+bool BspWorld::sweepTrisAny(const Vec3& a, const Vec3& b, uint32_t visitId) const {
+    float t;
+    Vec3  n;
+    return sweepTrisInternal(a, b, t, n, visitId, true);
+}
+
 bool BspWorld::sweep(const Vec3& a, const Vec3& b,
                      float& t_hit, Vec3& norm) const {
     if (!m_loaded) return false;
@@ -1287,26 +1455,71 @@ bool BspWorld::sweep(const Vec3& a, const Vec3& b,
     Vec3  bestN;
     bool  hit   = false;
 
-    for (const BspBrush& br : m_brushes) {
-        // Broad-phase AABB reject
-        if (br.mxX < smnX || br.mnX > smxX) continue;
-        if (br.mxY < smnY || br.mnY > smxY) continue;
-        if (br.mxZ < smnZ || br.mnZ > smxZ) continue;
+    // Brush sweep via spatial grid — reuse sweepId for triangle dedup below.
+    uint32_t& sweepId = sweepCounter();
+    ++sweepId;
 
-        float t;
-        Vec3  n;
-        if (sweepBrush(a, b, br, t, n) && t < bestT) {
-            bestT = t;
-            bestN = n;
-            hit   = true;
+    // ── Brush sweep via spatial grid (O(1) per query instead of O(n)) ──────
+    if (!m_brushGrid.empty()) {
+        thread_local std::vector<uint32_t> visited;
+        if (visited.size() < m_brushes.size())
+            visited.resize(m_brushes.size());
+
+        const int cx0 = static_cast<int>(std::floorf(smnX / kBrushGridCell));
+        const int cx1 = static_cast<int>(std::floorf(smxX / kBrushGridCell));
+        const int cy0 = static_cast<int>(std::floorf(smnY / kBrushGridCell));
+        const int cy1 = static_cast<int>(std::floorf(smxY / kBrushGridCell));
+
+        for (int cx = cx0; cx <= cx1; ++cx) {
+            for (int cy = cy0; cy <= cy1; ++cy) {
+                const int64_t key = (static_cast<int64_t>(static_cast<int32_t>(cx)) << 32)
+                                  | static_cast<uint32_t>(static_cast<int32_t>(cy));
+                const auto it = m_brushGrid.find(key);
+                if (it == m_brushGrid.end()) continue;
+
+                for (uint32_t bi : it->second) {
+                    if (visited[bi] == sweepId) continue;  // dedup
+                    visited[bi] = sweepId;
+
+                    const BspBrush& br = m_brushes[bi];
+                    // Broad-phase AABB reject
+                    if (br.mxX < smnX || br.mnX > smxX) continue;
+                    if (br.mxY < smnY || br.mnY > smxY) continue;
+                    if (br.mxZ < smnZ || br.mnZ > smxZ) continue;
+
+                    float t;
+                    Vec3  n;
+                    if (sweepBrush(a, b, br, t, n) && t < bestT) {
+                        bestT = t;
+                        bestN = n;
+                        hit   = true;
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback: linear scan (used when grid hasn't been built yet)
+        for (const BspBrush& br : m_brushes) {
+            if (br.mxX < smnX || br.mnX > smxX) continue;
+            if (br.mxY < smnY || br.mnY > smxY) continue;
+            if (br.mxZ < smnZ || br.mnZ > smxZ) continue;
+
+            float t;
+            Vec3  n;
+            if (sweepBrush(a, b, br, t, n) && t < bestT) {
+                bestT = t;
+                bestN = n;
+                hit   = true;
+            }
         }
     }
 
     // Also test against extracted mesh triangles (walls, ramps, floors).
+    // Pass sweepId for triangle dedup (prevent re-test across grid cells).
     {
         float triT;
         Vec3  triN;
-        if (sweepTris(a, b, triT, triN) && triT < bestT) {
+        if (sweepTrisInternal(a, b, triT, triN, sweepId, false) && triT < bestT) {
             bestT = triT;
             bestN = triN;
             hit   = true;
@@ -1315,4 +1528,68 @@ bool BspWorld::sweep(const Vec3& a, const Vec3& b,
 
     if (hit) { t_hit = bestT; norm = bestN; }
     return hit;
+}
+
+// ─── BspWorld::sweepAny ──────────────────────────────────────────────────────
+// Fast any-hit query for visibility (line-of-sight) checks.
+// Early-exits on FIRST hit — no closest-hit search.  Huge speedup for blocked
+// rays (the common case near walls).
+bool BspWorld::sweepAny(const Vec3& a, const Vec3& b) const {
+    if (!m_loaded) return false;
+
+    const float smnX = std::min(a.x, b.x) - 1.f,  smxX = std::max(a.x, b.x) + 1.f;
+    const float smnY = std::min(a.y, b.y) - 1.f,  smxY = std::max(a.y, b.y) + 1.f;
+    const float smnZ = std::min(a.z, b.z) - 1.f,  smxZ = std::max(a.z, b.z) + 1.f;
+
+    uint32_t& sweepId = sweepCounter();
+    ++sweepId;
+
+    // ── Brush sweep — early-exit on first hit ───────────────────────────
+    if (!m_brushGrid.empty()) {
+        thread_local std::vector<uint32_t> visited;
+        if (visited.size() < m_brushes.size())
+            visited.resize(m_brushes.size());
+
+        const int cx0 = static_cast<int>(std::floorf(smnX / kBrushGridCell));
+        const int cx1 = static_cast<int>(std::floorf(smxX / kBrushGridCell));
+        const int cy0 = static_cast<int>(std::floorf(smnY / kBrushGridCell));
+        const int cy1 = static_cast<int>(std::floorf(smxY / kBrushGridCell));
+
+        for (int cx = cx0; cx <= cx1; ++cx) {
+            for (int cy = cy0; cy <= cy1; ++cy) {
+                const int64_t key = (static_cast<int64_t>(static_cast<int32_t>(cx)) << 32)
+                                  | static_cast<uint32_t>(static_cast<int32_t>(cy));
+                const auto it = m_brushGrid.find(key);
+                if (it == m_brushGrid.end()) continue;
+
+                for (uint32_t bi : it->second) {
+                    if (visited[bi] == sweepId) continue;
+                    visited[bi] = sweepId;
+
+                    const BspBrush& br = m_brushes[bi];
+                    if (br.mxX < smnX || br.mnX > smxX) continue;
+                    if (br.mxY < smnY || br.mnY > smxY) continue;
+                    if (br.mxZ < smnZ || br.mnZ > smxZ) continue;
+
+                    float t;
+                    Vec3  n;
+                    if (sweepBrush(a, b, br, t, n))
+                        return true;  // any hit = blocked
+                }
+            }
+        }
+    } else {
+        for (const BspBrush& br : m_brushes) {
+            if (br.mxX < smnX || br.mnX > smxX) continue;
+            if (br.mxY < smnY || br.mnY > smxY) continue;
+            if (br.mxZ < smnZ || br.mnZ > smxZ) continue;
+            float t;
+            Vec3  n;
+            if (sweepBrush(a, b, br, t, n))
+                return true;
+        }
+    }
+
+    // Triangle mesh — any-hit with dedup.
+    return sweepTrisAny(a, b, sweepId);
 }

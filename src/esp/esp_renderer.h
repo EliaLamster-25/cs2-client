@@ -11,7 +11,6 @@ public:
     void drawBomb(Renderer& r, const EntityManager::Snapshot& snap);
     void drawSpectators(Renderer& r, const EntityManager::Snapshot& snap);
     void drawRadar(Renderer& r, const EntityManager::Snapshot& snap);
-    void drawVoteRevealer(Renderer& r);
 
     void setFont(const FontAtlas& f) { m_font = &f; }
 
