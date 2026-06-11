@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <string>
 #include <cstdint>
+#include <cstddef>
 
 class Renderer;
 class FontAtlas;
@@ -53,9 +54,15 @@ public:
 
     // Reusable Busan-style components
     bool accentButton(const char* id, const char* text, float w = 0.f, float h = 38.f);
+    bool textField(const char* id, char* buf, std::size_t bufSize, float h = 40.f, bool password = false);
+    void onChar(wchar_t ch);
+    void onKeyDown(WPARAM vk);
+    void pollKeyboardTextInput();
+    void pasteClipboardText();
     bool toggleCheckbox(const char* id, const char* label, bool* value, float h = 38.f);
     bool sliderFloatValue(const char* id, const char* label, float* value,
                           float min, float max, const char* fmt = "%.0f", float h = 38.f);
+    bool isSliderEditing() const { return m_sliderEditActive; }
     bool keybindCard(const char* id, const char* label, int* targetKey, float h = 38.f);
     void separator();
     void dummy(float h);
@@ -68,7 +75,11 @@ public:
     float mouseX() const { return m_mouseX; }
     float mouseY() const { return m_mouseY; }
     bool  mouseDown() const { return m_mouseDown; }
-    bool  mouseClicked() const { return m_mouseClicked; }
+    bool  mouseClicked() const { return m_mouseClicked && !m_modalInputBlocked; }
+    bool  mouseClickedRaw() const { return m_mouseClicked; }
+    void  consumeMouseClick() { m_mouseClicked = false; }
+    void  setModalInputBlocked(bool blocked) { m_modalInputBlocked = blocked; }
+    bool  modalInputBlocked() const { return m_modalInputBlocked; }
     Renderer&  renderer() const { return *m_renderer; }
     const FontAtlas& font() const { return *m_font; }
 
@@ -92,6 +103,7 @@ private:
 
     float m_mouseX = 0, m_mouseY = 0;
     bool  m_mouseDown = false, m_mouseClicked = false, m_mouseReleased = false;
+    bool  m_modalInputBlocked = false;
 
     // Immediate-mode interaction state
     int m_hotItem     = -1;  // widget under cursor
@@ -123,4 +135,18 @@ private:
     int m_comboPopupResultId = -1;
     bool m_comboPopupResultValid = false;
     float* m_popupColor = nullptr;
+
+    // Slider value text edit
+    bool  m_sliderEditActive = false;
+    int   m_sliderEditId = -1;
+    char  m_sliderEditBuf[32]{};
+    float m_sliderEditMin = 0.f;
+    float m_sliderEditMax = 0.f;
+    float* m_sliderEditValue = nullptr;
+
+    uint32_t m_activeTextFieldId = 0;
+    char* m_activeTextFieldBuf = nullptr;
+    std::size_t m_activeTextFieldSize = 0;
+    float m_textCaretBlink = 0.f;
+    bool m_keyPrev[256]{};
 };

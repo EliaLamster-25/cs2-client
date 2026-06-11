@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=760, height=500, initial-scale=1">
+  <title>crymore.pw</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="window">
+    <header class="titlebar">
+      <div class="titlebar-drag"></div>
+      <button class="icon-btn close" id="btn-close" type="button" aria-label="Close">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M1 1l8 8M9 1L1 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </header>
+
+    <!-- PAGE 1 — login only -->
+    <section id="page-login" class="page page-login">
+      <div class="login-wrap">
+        <div class="login-brand">
+          <div class="logo-frame">
+            <img class="logo" src="logo.png" alt="crymore">
+          </div>
+          <h1 class="brand-title">crymore.pw</h1>
+          <p class="brand-sub">rebirth</p>
+        </div>
+
+        <form class="login-form" id="login-form">
+          <div class="field">
+            <label for="username">Username</label>
+            <input id="username" type="text" autocomplete="username" placeholder="demo" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" type="password" autocomplete="current-password" placeholder="••••••••">
+          </div>
+          <label class="toggle-row" for="show-password">
+            <input id="show-password" type="checkbox" class="toggle-input">
+            <span class="toggle-box"></span>
+            <span class="toggle-label">Show password</span>
+          </label>
+          <button class="btn btn-primary" id="btn-login" type="submit">
+            <span class="btn-label">Sign in</span>
+          </button>
+          <p class="form-error" id="login-error"></p>
+          <p class="footnote">offline: <code>demo</code> / <code>demo</code></p>
+        </form>
+      </div>
+    </section>
+
+    <!-- PAGE 2 — injection / status -->
+    <section id="page-status" class="page page-status hidden">
+      <div class="status-wrap">
+        <header class="status-header">
+          <div class="status-brand">
+            <img class="logo-sm" src="logo.png" alt="">
+            <div>
+              <div class="status-user" id="welcome-title">Welcome</div>
+              <div class="status-sub">Injection pipeline</div>
+            </div>
+          </div>
+          <button class="btn-ghost" id="btn-logout" type="button">Sign out</button>
+        </header>
+
+        <div class="status-grid">
+          <div class="stat-tile" id="tile-session">
+            <div class="stat-label">Session</div>
+            <div class="stat-row">
+              <span class="stat-dot" id="dot-session"></span>
+              <span class="stat-value" id="stat-session">authorized</span>
+            </div>
+          </div>
+          <div class="stat-tile" id="tile-env">
+            <div class="stat-label">Environment</div>
+            <div class="stat-row">
+              <span class="stat-dot" id="dot-env"></span>
+              <span class="stat-value" id="stat-env">clear</span>
+            </div>
+          </div>
+          <div class="stat-tile" id="tile-phase">
+            <div class="stat-label">Injection</div>
+            <div class="stat-row">
+              <span class="stat-dot" id="dot-phase"></span>
+              <span class="stat-value" id="stat-phase">idle</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="inject-panel">
+          <div class="inject-banner" id="env-banner">
+            <span class="inject-dot"></span>
+            <div class="inject-copy">
+              <div class="inject-title" id="env-title">Ready to inject</div>
+              <div class="inject-desc" id="env-text">No protected services detected.</div>
+            </div>
+          </div>
+
+          <div class="progress-block" id="progress-block">
+            <div class="progress-head">
+              <span>Status</span>
+              <span class="progress-label" id="progress-label">Waiting</span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-fill" id="progress-fill"></div>
+            </div>
+          </div>
+
+          <button class="btn btn-primary btn-inject" id="btn-launch" type="button">
+            <span class="btn-label">Inject overlay</span>
+          </button>
+        </div>
+
+        <div class="log-panel">
+          <div class="log-head">Console</div>
+          <pre class="log-body" id="log-lines"></pre>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -27,6 +27,8 @@ public:
     void drawLine      (float x1, float y1, float x2, float y2, unsigned int color, float thickness = 1.0f);
     void drawRoundedRect(float x, float y, float w, float h, unsigned int color, float r, float thickness = 1.0f);
     void drawRoundedFilledRect(float x, float y, float w, float h, unsigned int color, float r);
+    /// ImDrawFlags corner mask when in ImGui draw mode (e.g. ImDrawFlags_RoundCornersTop).
+    void drawRoundedFilledRectCorners(float x, float y, float w, float h, unsigned int color, float r, int corners);
     void drawGradientRect(float x, float y, float w, float h, unsigned int topColor, unsigned int botColor);
     void drawGradientRectH(float x, float y, float w, float h, unsigned int leftColor, unsigned int rightColor);
     void drawCircle    (float cx, float cy, float r, unsigned int color, float thickness = 1.0f);
@@ -47,8 +49,11 @@ public:
                             float& minX, float& minY, float& maxX, float& maxY) const;
     void drawImage(ID3D11ShaderResourceView* texture, float x, float y, float w, float h,
                    unsigned int color = 0xFFFFFFFFu);
+    void drawImageRgba(ID3D11ShaderResourceView* texture, float x, float y, float w, float h,
+                       unsigned int color = 0xFFFFFFFFu);
 
     ID3D11Device* device() const { return m_device.Get(); }
+    bool isReady() const { return m_swapChain != nullptr; }
     int screenWidth()  const { return m_width;  }
     int screenHeight() const { return m_height; }
 
@@ -57,6 +62,7 @@ private:
     void releaseRenderTarget();
     bool initShaders();
     bool initTexturedShaders();
+    bool initRgbaImageShader();
     bool initPostProcessShaders();
     bool initBlendState();
     bool initRasterizerState();
@@ -66,7 +72,8 @@ private:
     void useFlatPipeline();
     void flushBatch();
     void drawVertices(const float* verts, int vertexCount, D3D11_PRIMITIVE_TOPOLOGY topo);
-    void drawTexturedQuads(const float* verts, int quadCount, ID3D11ShaderResourceView* tex);
+    void drawTexturedQuads(const float* verts, int quadCount, ID3D11ShaderResourceView* tex,
+                           ID3D11PixelShader* psOverride = nullptr);
 
     struct TexturedVertex { float x, y, u, v, r, g, b, a; };
 
@@ -96,6 +103,7 @@ private:
     // Textured pipeline
     Microsoft::WRL::ComPtr<ID3D11VertexShader>      m_txVS;
     Microsoft::WRL::ComPtr<ID3D11PixelShader>       m_txPS;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader>       m_txRgbaPS;
     Microsoft::WRL::ComPtr<ID3D11VertexShader>      m_postVS;
     Microsoft::WRL::ComPtr<ID3D11PixelShader>       m_postPS;
     Microsoft::WRL::ComPtr<ID3D11InputLayout>        m_txInputLayout;

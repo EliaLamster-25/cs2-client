@@ -1,5 +1,62 @@
 #include "font.h"
+
+#include <Windows.h>
+
 #include <iostream>
+#include <cstring>
+#include <string>
+
+namespace {
+
+std::wstring resolveCs2PanoramaFont(const wchar_t* fileName) {
+    auto trySteamRoot = [](HKEY root, const char* subKey, const char* valueName) -> std::string {
+        HKEY hk{};
+        if (RegOpenKeyExA(root, subKey, 0, KEY_READ, &hk) != ERROR_SUCCESS)
+            return {};
+        char buf[512]{};
+        DWORD sz = sizeof(buf);
+        if (RegQueryValueExA(hk, valueName, nullptr, nullptr,
+                reinterpret_cast<LPBYTE>(buf), &sz) != ERROR_SUCCESS) {
+            RegCloseKey(hk);
+            return {};
+        }
+        RegCloseKey(hk);
+        std::string path = buf;
+        while (!path.empty() && (path.back() == '\\' || path.back() == '/'))
+            path.pop_back();
+        return path;
+    };
+
+    std::string steamPath = trySteamRoot(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath");
+    if (steamPath.empty())
+        steamPath = trySteamRoot(HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Valve\\Steam", "InstallPath");
+    if (steamPath.empty())
+        return {};
+
+    const std::string cs2Root = steamPath +
+        "\\steamapps\\common\\Counter-Strike Global Offensive";
+    const std::string rel = std::string("\\game\\csgo\\panorama\\fonts\\");
+    char narrowName[64]{};
+    WideCharToMultiByte(CP_UTF8, 0, fileName, -1, narrowName, sizeof(narrowName), nullptr, nullptr);
+    std::string full = cs2Root + rel + narrowName;
+    if (GetFileAttributesA(full.c_str()) == INVALID_FILE_ATTRIBUTES)
+        return {};
+
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, full.c_str(), -1, nullptr, 0);
+    if (wlen <= 0)
+        return {};
+    std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, full.c_str(), -1, wide.data(), wlen);
+    if (!wide.empty() && wide.back() == L'\0')
+        wide.pop_back();
+    return wide;
+}
+
+bool loadPrivateFont(const wchar_t* path) {
+    return path && path[0] && AddFontResourceExW(path, FR_PRIVATE, 0) != 0;
+}
+
+} // namespace
 
 // --- Row-based packer ---
 bool FontAtlas::pack(int w, int h, int& outX, int& outY) {
@@ -152,24 +209,27 @@ bool FontAtlas::init(ID3D11Device* device, const wchar_t* fontName, int renderPx
     {
         wchar_t fontPath[MAX_PATH];
         bool found = false;
-        // Look next to exe first, then working directory
         if (GetModuleFileNameW(nullptr, fontPath, MAX_PATH)) {
             wchar_t* slash = wcsrchr(fontPath, L'\\');
             if (slash) {
                 size_t remain = MAX_PATH - (size_t)((slash + 1) - fontPath);
                 wcscpy_s(slash + 1, remain, L"csgo_icons.ttf");
-                found = AddFontResourceExW(fontPath, FR_PRIVATE, 0) != 0;
+                found = loadPrivateFont(fontPath);
             }
         }
         if (!found)
-            found = AddFontResourceExW(L"csgo_icons.ttf", FR_PRIVATE, 0) != 0;
+            found = loadPrivateFont(L"csgo_icons.ttf");
         if (!found)
-            found = AddFontResourceExW(L"..\\csgo_icons.ttf", FR_PRIVATE, 0) != 0;
+            found = loadPrivateFont(L"..\\csgo_icons.ttf");
+        if (!found) {
+            const std::wstring cs2Font = resolveCs2PanoramaFont(L"csgo_icons.ttf");
+            found = loadPrivateFont(cs2Font.c_str());
+        }
 
         if (found) {
             HFONT hIconFont = CreateFontW(-renderPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                ANTIALIASED_QUALITY, DEFAULT_PITCH, L"csgo_icons");
+                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"csgo_icons");
             if (hIconFont) {
                 HFONT oldFont = (HFONT)SelectObject(dc, hIconFont);
                 // CS weapon / utility icons in the PUA range (csgo_icons.ttf)
@@ -235,6 +295,8 @@ bool FontAtlas::init(ID3D11Device* device, const wchar_t* fontName, int renderPx
                 SelectObject(dc, oldFont);
                 DeleteObject(hIconFont);
             }
+        } else {
+            std::cerr << "[Font] csgo_icons.ttf not found (weapon/grenade icons disabled)\n";
         }
     }
 

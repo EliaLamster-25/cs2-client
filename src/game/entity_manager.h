@@ -5,9 +5,12 @@
 #include "game/grenade.h"
 #include "math/matrix.h"
 #include "bsp/bsp_world.h"
+#include "game/game_trace.h"
 #include "config.h"
 #include <array>
-#include <mutex>
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <string>
 
 /// @file entity_manager.h
@@ -35,45 +38,63 @@ public:
         std::array<GrenadeData, 16> grenades{};
         PreThrowData preThrow{};
         BombData bomb{};
+        GameRulesData gameRules{};
         ViewMatrix viewMatrix{};
         std::uintptr_t localPawn = 0;
         int localTeam = 0;
+        int localPing = -1;
+        bool hasLocalPlayer = false;
+        Vec3 localOrigin{};
+        Vec3 localViewAngles{};
         std::string currentMapName;
     };
+
+    using PublishedSnapshot = std::shared_ptr<const Snapshot>;
 
     /// Initialise with module base addresses.
     bool init(const Process& proc);
 
     /// Re-read every entity from game memory.  Call once per frame.
-    void update(const Process& proc);
+    void update(Process& proc);
+
+    /// Latest immutable frame for the render thread (no copy, no mutex).
+    PublishedSnapshot publishedFrame() const {
+        const int slot = m_readSlot.load(std::memory_order_acquire);
+        return m_frames[slot];
+    }
 
     /// Access the player array — returns a snapshot safe to use off-thread.
     std::array<PlayerData, cfg::kMaxPlayers> players() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_players;
+        const auto pub = publishedFrame();
+        if (!pub) return {};
+        return pub->players;
     }
 
     static constexpr int kMaxSpectators = cfg::kMaxPlayers;
     std::array<SpectatorData, kMaxSpectators> spectators() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_spectators;
+        const auto pub = publishedFrame();
+        if (!pub) return {};
+        return pub->spectators;
     }
 
     /// The current view matrix (thread-safe copy).
     ViewMatrix viewMatrix() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_viewMatrix;
+        const auto pub = publishedFrame();
+        if (!pub) return {};
+        return pub->viewMatrix;
     }
 
     /// Team number of the local player (thread-safe copy).
     int localTeam() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_localTeam;
+        const auto pub = publishedFrame();
+        if (!pub) return 0;
+        return pub->localTeam;
     }
 
     std::uintptr_t localPawn() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_localPawn;
+        const auto pub = publishedFrame();
+        if (!pub) return 0;
+        return pub->localPawn;
     }
 
     std::uintptr_t clientBase() const { return m_clientBase; }
@@ -81,53 +102,48 @@ public:
     /// The current grenade list (thread-safe copy).
     static constexpr int kMaxGrenades = 16;
     std::array<GrenadeData, kMaxGrenades> grenades() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_grenades;
+        const auto pub = publishedFrame();
+        if (!pub) return {};
+        return pub->grenades;
     }
 
     /// Pre-throw trajectory for the local player (thread-safe copy).
     PreThrowData preThrow() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_preThrow;
+        const auto pub = publishedFrame();
+        if (!pub) return {};
+        return pub->preThrow;
     }
 
     BombData bomb() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_bomb;
+        const auto pub = publishedFrame();
+        if (!pub) return {};
+        return pub->bomb;
     }
 
     std::string currentMapName() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        return m_currentMapName;
+        const auto pub = publishedFrame();
+        if (!pub) return m_currentMapName;
+        return pub->currentMapName;
     }
 
     Snapshot snapshot() const {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        Snapshot snap;
-        snap.players = m_players;
-        snap.spectators = m_spectators;
-        snap.grenades = m_grenades;
-        snap.preThrow = m_preThrow;
-        snap.bomb = m_bomb;
-        snap.viewMatrix = m_viewMatrix;
-        snap.localPawn = m_localPawn;
-        snap.localTeam = m_localTeam;
-        snap.currentMapName = m_currentMapName;
-        return snap;
+        const auto pub = publishedFrame();
+        if (!pub) return {};
+        return *pub;
+    }
+
+    /// Tick count (ms) when entity data was last published to the render thread.
+    std::uint64_t lastUpdateTickMs() const {
+        return m_lastUpdateTickMs.load(std::memory_order_acquire);
     }
 
 private:
     std::uintptr_t m_clientBase = 0;
 
-    mutable std::mutex m_mutex;
-    std::array<PlayerData, cfg::kMaxPlayers> m_players{};
-    std::array<SpectatorData, kMaxSpectators> m_spectators{};
-    std::array<GrenadeData, kMaxGrenades> m_grenades{};
-    PreThrowData m_preThrow{};
-    BombData m_bomb{};
-    ViewMatrix m_viewMatrix{};
-    std::uintptr_t m_localPawn = 0;
-    int m_localTeam = 0;
+    std::shared_ptr<Snapshot> m_frames[2];
+    std::atomic<int> m_readSlot{ 0 };
+    std::array<GrenadeData, kMaxGrenades> m_lastPublishedGrenades{};
+    std::atomic<std::uint64_t> m_lastUpdateTickMs{ 0 };
 
     // Persistent per-grenade state for bounce floor tracking (entity-update thread only).
     struct GrenadePersist {
@@ -207,4 +223,7 @@ private:
     std::string    m_currentMapName;
     std::string    m_cs2Path;          ///< Detected at init() from Steam registry
     BspWorld       m_bspWorld;
+    GameTraceVis   m_gameTrace;
+    bool           m_gameTraceInitAttempted = false;
+    bool           m_gameTraceInitFailed = false;
 };

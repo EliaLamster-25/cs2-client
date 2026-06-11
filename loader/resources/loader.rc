@@ -1,0 +1,9 @@
+#ifndef IDR_PAYLOAD
+#define IDR_PAYLOAD 101
+#endif
+#ifndef IDR_BRAND_LOGO
+#define IDR_BRAND_LOGO 102
+#endif
+
+IDR_PAYLOAD    RCDATA "payload.bin"
+IDR_BRAND_LOGO RCDATA "brand_logo.png"

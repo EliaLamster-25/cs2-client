@@ -15,42 +15,51 @@ namespace offsets {
     /// Keeps the compiled defaults if a signature is not found.
     bool resolveRuntime(const Process& proc, std::uintptr_t clientBase);
 
+    /// Resolve engine2 globals (map client / BSP loading) at runtime.
+    bool resolveEngine2Runtime(const Process& proc, std::uintptr_t engine2Base);
+
     // ── engine2.dll ────────────────────────────────────────────────────────────
     namespace engine2 {
         /// Pointer to the CNetworkGameClient object.
-        /// Verified 2026-05-16 via a2x/cs2-dumper (was 0x90B1E0).
-        inline std::uintptr_t dwNetworkGameClient = 0x90A1A0;
+        /// Source: a2x/cs2-dumper — generated 2026-06-03.
+        inline std::uintptr_t dwNetworkGameClient = 0x908520;
     }
 
     // ── client.dll ─────────────────────────────────────────────────────────────
     namespace client {
-        /// Global entity list base pointer (dwEntityList).
-        inline std::uintptr_t dwEntityList            = 0x24E44E0;
+        /// Global entity list base pointer (dwEntityList / dwGameEntitySystem).
+        inline std::uintptr_t dwEntityList            = 0x24E4A30;
+
+        /// Highest allocated entity index within CGameEntitySystem (optional scan bound).
+        inline std::uintptr_t dwGameEntitySystem_highestEntityIndex = 8336;
 
         /// Local player controller pointer (dwLocalPlayerController).
-        inline std::uintptr_t dwLocalPlayerController = 0x231D830;
+        inline std::uintptr_t dwLocalPlayerController = 0x231D800;
 
         /// 4×4 view-projection matrix, float[16] (dwViewMatrix).
-        inline std::uintptr_t dwViewMatrix            = 0x2343AB0;
+        inline std::uintptr_t dwViewMatrix            = 0x2344810;
 
         /// Global current-time state pointer (dwGlobalVars).
-        /// Source: a2x/cs2-dumper — generated 2026-05-28.
-        inline std::uintptr_t dwGlobalVars            = 33941200;
+        inline std::uintptr_t dwGlobalVars            = 0x205CE50;
+
+        /// C_CSGameRules* (dwGameRules).
+        inline std::uintptr_t dwGameRules             = 0x234CE58;
 
         /// Local player pawn pointer (dwLocalPlayerPawn).
-        inline std::uintptr_t dwLocalPlayerPawn       = 0x2069800;
+        inline std::uintptr_t dwLocalPlayerPawn       = 0x2344078;
 
         /// Local player view angles — float[3] (pitch, yaw, roll), read directly.
-        /// Source: a2x/cs2-dumper dwViewAngles — 37042200 dec (CS2 May 22)
-        inline std::uintptr_t dwViewAngles            = 0x2353818;
+        inline std::uintptr_t dwViewAngles            = 0x2354DD8;
+
+        /// Sensitivity pointer + float field offset (a2x/cs2-dumper 2026-06-03).
+        inline std::uintptr_t dwSensitivity           = 0x233DA68;
+        inline std::uintptr_t dwSensitivity_sensitivity = 0x58;
 
         /// Global planted-C4 pointer holder (dwPlantedC4).
-        /// Source: a2x/cs2-dumper — generated 2026-05-28.
-        inline std::uintptr_t dwPlantedC4             = 37015304;
+        inline std::uintptr_t dwPlantedC4             = 0x234EBA8;
 
         /// Global carried/arming C4 pointer holder (dwWeaponC4).
-        /// Source: a2x/cs2-dumper — generated 2026-05-28.
-        inline std::uintptr_t dwWeaponC4              = 36421168;
+        inline std::uintptr_t dwWeaponC4              = 0x22CB100;
     }
 
 } // namespace offsets

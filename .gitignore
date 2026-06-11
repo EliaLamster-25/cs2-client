@@ -1,5 +1,6 @@
 # Build outputs
 build/
+build_test/
 out/
 x64/
 *.vcxproj
@@ -11,6 +12,10 @@ x64/
 CMakeCache.txt
 CMakeFiles/
 *.dir/
+**/bin/
+**/obj/
+**/Release/
+**/Debug/
 
 # Dependencies (vcpkg / cmake fetch)
 _deps/
@@ -24,17 +29,36 @@ configs/
 *.user
 *.log
 
+# Secrets / keys (never commit)
+loader/.payload_key
+loader/resources/payload.bin
+web/.dev.vars
+.wrangler/
+
+# Third-party tool outputs / map dumps
+cphys-extractor_*/
+*.vphys
+*.tri
+
 # Assets directory (images)
 assets/
 
 # Fonts
 *.ttf
 
-# IDE
+# IDE / editor
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
 
 # Windows reserved device name
 nul
+
+# Large binaries / publish artifacts
+*.dll
+*.exe
+*.sys
+*.pdb
+!loader/csharp/**/*.cs

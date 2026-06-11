@@ -50,6 +50,23 @@ static const char* kTxVS = R"(
 //   SamplerState sam : register(s0);
 // in the full concatenated shader string below (kTxSrc).
 
+static const char* kTxRgbaSrc = R"(
+    Texture2D tex : register(t0);
+    SamplerState sam : register(s0);
+    struct VS_IN { float2 pos : POSITION; float2 uv : TEXCOORD; float4 col : COLOR; };
+    struct PS_IN { float4 pos : SV_POSITION; float2 uv : TEXCOORD; float4 col : COLOR; };
+    cbuffer CB0 : register(b0) { float2 screenSize; float2 _pad; };
+    PS_IN VSMain(VS_IN i) {
+        PS_IN o;
+        o.pos = float4(i.pos.x/screenSize.x*2.0-1.0, i.pos.y/screenSize.y*-2.0+1.0, 0.0, 1.0);
+        o.uv = i.uv; o.col = i.col; return o;
+    }
+    float4 PSMain(PS_IN i) : SV_TARGET {
+        float4 t = tex.Sample(sam, i.uv);
+        return t * i.col;
+    }
+)";
+
 static const char* kTxSrc = R"(
     Texture2D tex : register(t0);
     SamplerState sam : register(s0);
@@ -258,6 +275,7 @@ bool Renderer::init(HWND hwnd, int width, int height) {
     if (!createRenderTarget()) return false;
     if (!initShaders())        return false;
     if (!initTexturedShaders()) return false;
+    if (!initRgbaImageShader()) return false;
     if (!initPostProcessShaders()) return false;
     if (!initBlendState())     return false;
     if (!initRasterizerState()) return false;
@@ -454,6 +472,17 @@ bool Renderer::initTexturedShaders() {
     return true;
 }
 
+bool Renderer::initRgbaImageShader() {
+    Microsoft::WRL::ComPtr<ID3DBlob> psBlob, err;
+    if (FAILED(D3DCompile(kTxRgbaSrc, strlen(kTxRgbaSrc), nullptr,
+        nullptr, nullptr, "PSMain", "ps_4_0", 0, 0, &psBlob, &err))) {
+        if (err) std::cerr << (char*)err->GetBufferPointer();
+        return false;
+    }
+    return SUCCEEDED(m_device->CreatePixelShader(
+        psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_txRgbaPS));
+}
+
 bool Renderer::initPostProcessShaders() {
     Microsoft::WRL::ComPtr<ID3DBlob> vsBlob, psBlob, err;
     if (FAILED(D3DCompile(kPostSrc, strlen(kPostSrc), nullptr,
@@ -528,18 +557,13 @@ void Renderer::beginFrame() {
     m_imguiClipPushed = false;
     const bool directEspPath = g_cfg.espEnabled || g_cfg.menuVisible;
 
-    int latencyMode = g_cfg.latencyMode;
-    if (latencyMode < 0) latencyMode = 0;
-    if (latencyMode > 2) latencyMode = 2;
     static int s_lastLatencyKey = -1;
-    const int latencyKey = latencyMode + (directEspPath ? 100 : 0);
+    const int latencyKey = directEspPath ? 1 : 0;
     if (latencyKey != s_lastLatencyKey) {
         s_lastLatencyKey = latencyKey;
         Microsoft::WRL::ComPtr<IDXGIDevice1> dxgiDevice1;
-        if (SUCCEEDED(m_device.As(&dxgiDevice1)) && dxgiDevice1) {
-            const UINT maxLatency = directEspPath ? 1u : ((latencyMode == 1) ? 1u : 2u);
-            dxgiDevice1->SetMaximumFrameLatency(maxLatency);
-        }
+        if (SUCCEEDED(m_device.As(&dxgiDevice1)) && dxgiDevice1)
+            dxgiDevice1->SetMaximumFrameLatency(1u);
     }
 
     int aaMode = g_cfg.aaMode;
@@ -616,10 +640,6 @@ void Renderer::runPostProcessAA() {
 void Renderer::endFrame() {
     const bool directEspPath = g_cfg.espEnabled || g_cfg.menuVisible;
 
-    int latencyMode = g_cfg.latencyMode;
-    if (latencyMode < 0) latencyMode = 0;
-    if (latencyMode > 2) latencyMode = 2;
-
     int aaMode = g_cfg.aaMode;
     if (aaMode < 0) aaMode = 0;
     if (aaMode > 5) aaMode = 5;
@@ -644,11 +664,12 @@ void Renderer::endFrame() {
         runPostProcessAA();
     }
 
-    const UINT syncInterval = directEspPath ? 0u : ((latencyMode == 1) ? 0u : 1u);
-    m_swapChain->Present(syncInterval, 0);
+    m_swapChain->Present(0, 0);
 }
 
 void Renderer::resize(int width, int height) {
+    if (!m_swapChain)
+        return;
     if (width == m_width && height == m_height) return;
     m_width = width; m_height = height;
     releaseRenderTarget();
@@ -951,6 +972,20 @@ void Renderer::drawRoundedFilledRect(float x, float y, float w, float h,
     drawVertices(buf.data(), n, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
+void Renderer::drawRoundedFilledRectCorners(float x, float y, float w, float h,
+                                             unsigned int color, float r, int corners) {
+    if (w <= 0.f || h <= 0.f)
+        return;
+
+    if (m_useImGuiDrawMode) {
+        ImGui::GetBackgroundDrawList()->AddRectFilled(
+            ImVec2(x, y), ImVec2(x + w, y + h), argbToImU32(color), r, corners);
+        return;
+    }
+
+    drawRoundedFilledRect(x, y, w, h, color, r);
+}
+
 void Renderer::drawRoundedRect(float x, float y, float w, float h,
                                 unsigned int color, float r, float thickness) {
     if (m_useImGuiDrawMode) {
@@ -1144,11 +1179,13 @@ float Renderer::centerY(float boxH, float fontSize) const {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void Renderer::drawTexturedQuads(const float* verts, int quadCount,
-                                  ID3D11ShaderResourceView* tex) {
+                                  ID3D11ShaderResourceView* tex,
+                                  ID3D11PixelShader* psOverride) {
     int vertexCount = quadCount * 6;
     if (vertexCount == 0) return;
 
     useTexturedPipeline();
+    m_context->PSSetShader(psOverride ? psOverride : m_txPS.Get(), nullptr, 0);
     m_context->PSSetShaderResources(0, 1, &tex);
 
     const UINT stride = 8 * sizeof(float), offset = 0;
@@ -1188,6 +1225,35 @@ void Renderer::drawImage(ID3D11ShaderResourceView* texture, float x, float y, fl
         x,     y + h, 0.f, 1.f, c[0], c[1], c[2], c[3],
     };
     drawTexturedQuads(verts, 1, texture);
+}
+
+void Renderer::drawImageRgba(ID3D11ShaderResourceView* texture, float x, float y, float w, float h,
+                             unsigned int color) {
+    if (!texture || w <= 0.f || h <= 0.f || !m_txRgbaPS)
+        return;
+
+    if (m_useImGuiDrawMode) {
+        ImGui::GetBackgroundDrawList()->AddImage(
+            reinterpret_cast<ImTextureID>(texture),
+            ImVec2(x, y),
+            ImVec2(x + w, y + h),
+            ImVec2(0.f, 0.f),
+            ImVec2(1.f, 1.f),
+            argbToImU32(color));
+        return;
+    }
+
+    float c[4];
+    argbToF4(color, c);
+    float verts[] = {
+        x,     y,     0.f, 0.f, c[0], c[1], c[2], c[3],
+        x + w, y,     1.f, 0.f, c[0], c[1], c[2], c[3],
+        x,     y + h, 0.f, 1.f, c[0], c[1], c[2], c[3],
+        x + w, y,     1.f, 0.f, c[0], c[1], c[2], c[3],
+        x + w, y + h, 1.f, 1.f, c[0], c[1], c[2], c[3],
+        x,     y + h, 0.f, 1.f, c[0], c[1], c[2], c[3],
+    };
+    drawTexturedQuads(verts, 1, texture, m_txRgbaPS.Get());
 }
 
 void Renderer::drawText(const FontAtlas& font, float x, float y,

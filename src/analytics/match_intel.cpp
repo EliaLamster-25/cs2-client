@@ -1,17 +1,12 @@
 #include "analytics/match_intel.h"
 
 #include "config.h"
-#include "json.hpp"
 
 #include <Windows.h>
 
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
 #include <sstream>
-
-using json = nlohmann::json;
 
 namespace {
 constexpr float kHeatCell = 512.f;
@@ -37,16 +32,14 @@ bool parseHeatKey(const std::string& key, int& x, int& y) {
     }
 }
 
-std::filesystem::path lineupFilePath() {
-    return std::filesystem::path("configs") / "utility_library.json";
-}
+} // namespace
 
+namespace {
 float distSq2D(const Vec3& a, const Vec3& b) {
     const float dx = a.x - b.x;
     const float dy = a.y - b.y;
     return dx * dx + dy * dy;
 }
-
 } // namespace
 
 MatchIntel& MatchIntel::instance() {
@@ -116,105 +109,10 @@ void MatchIntel::finalizeRound() {
     m_localGotOpeningKill = false;
 }
 
-void MatchIntel::loadLineupsIfNeeded() {
-    if (m_lineupsLoaded)
-        return;
-    m_lineupsLoaded = true;
-
-    std::ifstream in(lineupFilePath(), std::ios::binary);
-    if (!in.is_open())
-        return;
-
-    try {
-        json j;
-        in >> j;
-        if (!j.is_array())
-            return;
-
-        for (const auto& item : j) {
-            UtilityLineup lu;
-            lu.map = item.value("map", "");
-            lu.team = item.value("team", 0);
-            lu.type = item.value("type", "");
-            lu.throwYaw = item.value("throwYaw", 0.f);
-            lu.createdMs = item.value("createdMs", 0ull);
-            lu.throwPos = Vec3(item["throwPos"].value("x", 0.f), item["throwPos"].value("y", 0.f), item["throwPos"].value("z", 0.f));
-            lu.landPos = Vec3(item["landPos"].value("x", 0.f), item["landPos"].value("y", 0.f), item["landPos"].value("z", 0.f));
-            if (!lu.map.empty() && !lu.type.empty())
-                m_lineups.push_back(std::move(lu));
-        }
-    } catch (...) {
-    }
-}
-
-void MatchIntel::saveLineups() {
-    if (!m_lineupsDirty)
-        return;
-
-    const auto path = lineupFilePath();
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-
-    json out = json::array();
-    for (const auto& lu : m_lineups) {
-        out.push_back({
-            { "map", lu.map },
-            { "team", lu.team },
-            { "type", lu.type },
-            { "throwYaw", lu.throwYaw },
-            { "createdMs", lu.createdMs },
-            { "throwPos", { { "x", lu.throwPos.x }, { "y", lu.throwPos.y }, { "z", lu.throwPos.z } } },
-            { "landPos", { { "x", lu.landPos.x }, { "y", lu.landPos.y }, { "z", lu.landPos.z } } }
-        });
-    }
-
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f.is_open())
-        return;
-    f << out.dump(2);
-    m_lineupsDirty = false;
-}
-
-void MatchIntel::registerUtilityLineup(const EntityManager::Snapshot&, const GrenadeData& grenade, std::uint64_t tNow) {
-    if (!m_throwCandidate.active)
-        return;
-    if (tNow - m_throwCandidate.atMs > 3500ull)
-        return;
-    if (m_throwCandidate.type != grenade.type)
-        return;
-    if (!grenade.hasStableLandPos && !grenade.isDeployed)
-        return;
-
-    UtilityLineup lu;
-    lu.map = m_throwCandidate.map;
-    lu.team = m_throwCandidate.team;
-    lu.type = grenadeTypeName(grenade.type);
-    lu.throwPos = m_throwCandidate.origin;
-    lu.throwYaw = m_throwCandidate.yaw;
-    lu.landPos = grenade.hasStableLandPos ? grenade.stableLandPos : grenade.origin;
-    lu.createdMs = tNow;
-
-    for (const auto& e : m_lineups) {
-        if (e.map != lu.map || e.team != lu.team || e.type != lu.type)
-            continue;
-        if (distSq2D(e.throwPos, lu.throwPos) < 90.f * 90.f
-            && distSq2D(e.landPos, lu.landPos) < 140.f * 140.f) {
-            m_throwCandidate.active = false;
-            return;
-        }
-    }
-
-    m_lineups.push_back(std::move(lu));
-    if (m_lineups.size() > 1200)
-        m_lineups.erase(m_lineups.begin(), m_lineups.begin() + (m_lineups.size() - 1200));
-    m_throwCandidate.active = false;
-    m_lineupsDirty = true;
-
-    pushEvent("utility", "Saved utility lineup");
-}
-
 void MatchIntel::updateReplayViewLocked() {
-    if (m_roundLive || m_rounds.empty())
+    if (m_replayRoundIndex >= 0 && m_replayRoundIndex < static_cast<int>(m_rounds.size()))
+        m_replayEventsView = m_rounds[static_cast<std::size_t>(m_replayRoundIndex)].events;
+    else if (m_roundLive || m_rounds.empty())
         m_replayEventsView = m_currentRoundEvents;
     else
         m_replayEventsView = m_rounds.back().events;
@@ -229,11 +127,59 @@ void MatchIntel::updateReplayViewLocked() {
         m_replayEventIndex = static_cast<int>(m_replayEventsView.size()) - 1;
 }
 
+void MatchIntel::resetSessionLocked() {
+    m_currentRound = 1;
+    m_roundLive = false;
+    m_roundStartMs = 0;
+    m_prevRoundStartCount = -1;
+    m_prevRoundEndCount = -1;
+    m_openingResolved = false;
+    m_localGotOpeningKill = false;
+    m_prevBombPlanted = false;
+    m_prevBombDefusing = false;
+    m_prevAliveT = 0;
+    m_prevAliveCT = 0;
+    m_prevPlayers.clear();
+    m_threatStats.clear();
+    m_cues.clear();
+    m_threatCards.clear();
+    m_currentRoundEvents.clear();
+    m_rounds.clear();
+    m_replayEventIndex = 0;
+    m_replayRoundIndex = -1;
+    m_replayEventsView.clear();
+    m_deathHeat.clear();
+    m_failedEntryHeat.clear();
+    m_localDeaths = 0;
+}
+
+void MatchIntel::resetSession() {
+    std::lock_guard<std::mutex> lg(m_mutex);
+    resetSessionLocked();
+}
+
+void MatchIntel::setReplayRoundIndex(int index) {
+    std::lock_guard<std::mutex> lg(m_mutex);
+    m_replayRoundIndex = index;
+    updateReplayViewLocked();
+}
+
+int MatchIntel::replayRoundIndex() const {
+    std::lock_guard<std::mutex> lg(m_mutex);
+    return m_replayRoundIndex;
+}
+
 void MatchIntel::update(const EntityManager::Snapshot& snap) {
     std::lock_guard<std::mutex> lg(m_mutex);
-    loadLineupsIfNeeded();
+
+    if (!snap.currentMapName.empty() && snap.currentMapName != m_lastMapName) {
+        if (!m_lastMapName.empty())
+            resetSessionLocked();
+        m_lastMapName = snap.currentMapName;
+    }
 
     const std::uint64_t tNow = nowMs();
+    const bool streamSafe = (m_perfProfile >= 2);
     m_cues.clear();
 
     const PlayerData* local = nullptr;
@@ -282,21 +228,62 @@ void MatchIntel::update(const EntityManager::Snapshot& snap) {
         }
     }
 
-    if (!m_roundLive && (aliveT + aliveCT) >= 2) {
-        m_roundLive = true;
-        m_roundStartMs = tNow;
-        m_openingResolved = false;
-        m_localGotOpeningKill = false;
-        pushEvent("round", "Round started");
-    }
+    const bool bothTeamsAlive = aliveT >= 1 && aliveCT >= 1;
+    const auto& gr = snap.gameRules;
 
-    const bool roundEndedByElim = m_roundLive && (aliveT == 0 || aliveCT == 0);
-    const bool roundEndedByBomb = m_roundLive && m_prevBombPlanted && !snap.bomb.isPlanted;
-    if (roundEndedByElim || roundEndedByBomb) {
-        pushEvent("round", "Round ended");
-        finalizeRound();
-        ++m_currentRound;
-        m_roundLive = false;
+    if (gr.valid && !gr.warmupPeriod) {
+        if (m_prevRoundStartCount < 0) {
+            m_prevRoundStartCount = gr.roundStartCount;
+            m_prevRoundEndCount = gr.roundEndCount;
+            m_roundLive = gr.roundStartCount != gr.roundEndCount;
+            if (gr.roundStartRoundNumber > 0)
+                m_currentRound = gr.roundStartRoundNumber;
+            else if (gr.totalRoundsPlayed >= 0)
+                m_currentRound = gr.totalRoundsPlayed + (m_roundLive ? 1 : 0);
+            if (m_roundLive)
+                m_roundStartMs = tNow;
+        } else {
+            if (gr.roundStartCount != static_cast<std::uint8_t>(m_prevRoundStartCount)) {
+                m_prevRoundStartCount = gr.roundStartCount;
+                m_roundLive = true;
+                m_roundStartMs = tNow;
+                m_openingResolved = false;
+                m_localGotOpeningKill = false;
+                if (gr.roundStartRoundNumber > 0)
+                    m_currentRound = gr.roundStartRoundNumber;
+                else
+                    ++m_currentRound;
+                pushEvent("round", "Round started");
+            }
+
+            if (gr.roundEndCount != static_cast<std::uint8_t>(m_prevRoundEndCount)) {
+                m_prevRoundEndCount = gr.roundEndCount;
+                if (m_roundLive) {
+                    pushEvent("round", "Round ended");
+                    finalizeRound();
+                    m_roundLive = false;
+                }
+            }
+        }
+    } else if (!gr.valid) {
+        if (!m_roundLive && bothTeamsAlive) {
+            m_roundLive = true;
+            m_roundStartMs = tNow;
+            m_openingResolved = false;
+            m_localGotOpeningKill = false;
+            pushEvent("round", "Round started");
+        }
+
+        const bool oneTeamEliminated = (aliveT == 0) != (aliveCT == 0);
+        const bool minRoundAge = (tNow - m_roundStartMs) >= 4000ull;
+        const bool roundEndedByElim = m_roundLive && oneTeamEliminated && minRoundAge;
+        const bool roundEndedByBomb = m_roundLive && m_prevBombPlanted && !snap.bomb.isPlanted;
+        if (roundEndedByElim || roundEndedByBomb) {
+            pushEvent("round", "Round ended");
+            finalizeRound();
+            ++m_currentRound;
+            m_roundLive = false;
+        }
     }
 
     if (snap.bomb.isPlanted && !m_prevBombPlanted)
@@ -338,29 +325,11 @@ void MatchIntel::update(const EntityManager::Snapshot& snap) {
             m_cues.push_back({ "Low utility pressure detected", 0 });
     }
 
-    if (!snap.preThrow.isActive && m_throwCandidate.active && (tNow - m_throwCandidate.atMs > 4000ull)) {
-        ++m_utilityWasteHeat[heatKey(m_throwCandidate.localCellX, m_throwCandidate.localCellY)];
-        m_throwCandidate.active = false;
-    }
-
-    if (snap.preThrow.isActive && local) {
-        m_throwCandidate.active = true;
-        m_throwCandidate.atMs = tNow;
-        m_throwCandidate.map = snap.currentMapName;
-        m_throwCandidate.team = local->teamNum;
-        m_throwCandidate.type = snap.preThrow.type;
-        m_throwCandidate.origin = local->origin;
-        m_throwCandidate.yaw = local->eyeYaw;
-        m_throwCandidate.localCellX = cellCoord(local->origin.x, kHeatCell);
-        m_throwCandidate.localCellY = cellCoord(local->origin.y, kHeatCell);
-    }
-
     for (const auto& g : snap.grenades) {
         if (!g.isValid)
             continue;
         if (g.timeAlive < 0.22f)
             pushEvent("utility", grenadeTypeName(g.type) + " thrown", g.origin);
-        registerUtilityLineup(snap, g, tNow);
     }
 
     std::unordered_map<std::uintptr_t, PrevPlayer> curPlayers;
@@ -424,14 +393,15 @@ void MatchIntel::update(const EntityManager::Snapshot& snap) {
                 const int cx = cellCoord(prev.pos.x, kHeatCell);
                 const int cy = cellCoord(prev.pos.y, kHeatCell);
                 ++m_deathHeat[heatKey(cx, cy)];
+                ++m_localDeaths;
                 if (openingWindow && !m_localGotOpeningKill)
                     ++m_failedEntryHeat[heatKey(cx, cy)];
             }
         }
 
-        if (prev.alive && nowP.alive) {
+        if (prev.alive && nowP.alive && !streamSafe) {
             const float d2 = distSq2D(prev.pos, nowP.pos);
-            if (d2 > 1700.f * 1700.f)
+            if (d2 > 2400.f * 2400.f)
                 pushEvent("rotate", (p.name.empty() ? std::string("Player") : p.name) + " rotate", nowP.pos);
         }
     }
@@ -463,8 +433,8 @@ void MatchIntel::update(const EntityManager::Snapshot& snap) {
     if (m_threatCards.size() > kMaxThreatCards)
         m_threatCards.resize(kMaxThreatCards);
 
-    if (m_cues.size() > kMaxCues)
-        m_cues.resize(kMaxCues);
+    if (m_cues.size() > (streamSafe ? 4 : kMaxCues))
+        m_cues.resize(streamSafe ? 4 : kMaxCues);
 
     m_prevBombPlanted = snap.bomb.isPlanted;
     m_prevBombDefusing = snap.bomb.isBeingDefused;
@@ -472,7 +442,6 @@ void MatchIntel::update(const EntityManager::Snapshot& snap) {
     m_prevAliveCT = aliveCT;
 
     updateReplayViewLocked();
-    saveLineups();
 }
 
 MatchIntel::View MatchIntel::view() const {
@@ -482,11 +451,18 @@ MatchIntel::View MatchIntel::view() const {
     v.perfProfile = m_perfProfile;
     v.currentRound = m_currentRound;
     v.roundLive = m_roundLive;
+    v.mapName = m_lastMapName;
+    v.storedRoundCount = static_cast<int>(m_rounds.size());
+    v.localDeaths = m_localDeaths;
     v.cues = m_cues;
     v.threats = m_threatCards;
     v.replayEvents = m_replayEventsView;
     v.replayEventMax = static_cast<int>(m_replayEventsView.size()) > 0 ? static_cast<int>(m_replayEventsView.size()) - 1 : 0;
     v.replayEventIndex = std::clamp(m_replayEventIndex, 0, v.replayEventMax);
+    v.replayRoundMax = static_cast<int>(m_rounds.size()) > 0 ? static_cast<int>(m_rounds.size()) - 1 : 0;
+    v.replayRoundIndex = (m_replayRoundIndex >= 0)
+        ? std::clamp(m_replayRoundIndex, 0, v.replayRoundMax)
+        : (v.replayRoundMax >= 0 ? v.replayRoundMax : 0);
 
     auto buildHeat = [](const std::unordered_map<std::string, int>& src) {
         std::vector<HeatPoint> out;
@@ -506,14 +482,6 @@ MatchIntel::View MatchIntel::view() const {
 
     v.deathHeat = buildHeat(m_deathHeat);
     v.failedEntryHeat = buildHeat(m_failedEntryHeat);
-    v.utilityWasteHeat = buildHeat(m_utilityWasteHeat);
-
-    v.lineupCount = static_cast<int>(m_lineups.size());
-    if (!m_lineups.empty()) {
-        v.lineupMatches.push_back(m_lineups.back());
-        if (m_lineups.size() > 1)
-            v.lineupMatches.push_back(m_lineups[m_lineups.size() - 2]);
-    }
 
     return v;
 }

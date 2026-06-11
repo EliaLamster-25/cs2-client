@@ -1,9 +1,22 @@
 #include "esp_renderer.h"
+#include "esp/chams_mesh.h"
+#include "game/aim_style.h"
+#include "overlay/overlay_metrics.h"
+#include "memory/process.h"
+#include "memory/rpm.h"
+#include "offsets/offsets.h"
+#include "offsets/netvars.h"
+#include "build_version.h"
+#include <cstdio>
 #include <functional>
 #include <vector>
 #include "config.h"
 #include "gui/gui.h"
+#include "profile/user_profile.h"
+#include "steam/steam_avatars.h"
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -11,28 +24,28 @@
 #include <cstdio>
 #include <imgui.h>
 
-// ─── Convex hull (gift-wrapping / Jarvis march) ───────────────────────────────
-static int jarvisHull(const Vec2* pts, int n, Vec2* hull) {
-    if (n < 3) { for (int i = 0; i < n; ++i) hull[i] = pts[i]; return n; }
+static void drawSteamAvatar(Renderer& r, ID3D11ShaderResourceView* srv,
+                            float x, float y, float size) {
+    if (!srv || size <= 0.f)
+        return;
+    const float radius = size * 0.24f;
+    if (r.isImGuiDrawMode()) {
+        ImGui::GetBackgroundDrawList()->AddImageRounded(
+            reinterpret_cast<ImTextureID>(srv),
+            ImVec2(x, y),
+            ImVec2(x + size, y + size),
+            ImVec2(0.f, 0.f),
+            ImVec2(1.f, 1.f),
+            IM_COL32(255, 255, 255, 255),
+            radius);
+        return;
+    }
+    r.drawImage(srv, x, y, size, size);
+    r.drawRoundedRect(x, y, size, size, 0x55FFFFFFu, radius, 1.f);
+}
 
-    int start = 0;
-    for (int i = 1; i < n; ++i)
-        if (pts[i].x < pts[start].x ||
-            (pts[i].x == pts[start].x && pts[i].y > pts[start].y))
-            start = i;
-
-    int curr = start, hc = 0;
-    do {
-        hull[hc++] = pts[curr];
-        int next = (curr + 1) % n;
-        for (int i = 0; i < n; ++i) {
-            float cross = (pts[next].x - pts[curr].x) * (pts[i].y - pts[curr].y)
-                        - (pts[next].y - pts[curr].y) * (pts[i].x - pts[curr].x);
-            if (cross < 0.f) next = i;
-        }
-        curr = next;
-    } while (curr != start && hc < n);
-    return hc;
+static unsigned int withAlpha(unsigned int color, unsigned int alpha) {
+    return (color & 0x00FFFFFFu) | (alpha << 24);
 }
 
 static wchar_t mapWeaponIconGlyph(const std::string& weaponId) {
@@ -134,6 +147,69 @@ static EspAnchor sanitizeBarAnchor(EspAnchor anchor) {
     }
 }
 
+static bool readLiveViewMatrix(Process& proc, std::uintptr_t clientBase, ViewMatrix& vm) {
+    if (clientBase == 0)
+        return false;
+    if (!proc.usesKernelMemory() && proc.handle() == nullptr)
+        return false;
+    return mem::readArray(proc,
+                          clientBase + offsets::client::dwViewMatrix,
+                          &vm.m[0][0], 16);
+}
+
+static bool isLikelyGamePtr(std::uintptr_t p) {
+    return p > 0x10000ull && p < 0x00007FFFFFFFFFFFull;
+}
+
+static bool refreshLivePlayerAnchor(Process& proc,
+                                    std::uintptr_t pawn,
+                                    Vec3& origin,
+                                    Vec3& headPos)
+{
+    if (!isLikelyGamePtr(pawn))
+        return false;
+
+    const std::uintptr_t sceneNode = mem::read<std::uintptr_t>(
+        proc, pawn + netvars::pawn::m_pGameSceneNode);
+    if (isLikelyGamePtr(sceneNode)) {
+        origin = mem::read<Vec3>(proc, sceneNode + netvars::scene_node::m_vecAbsOrigin);
+    } else {
+        origin = mem::read<Vec3>(proc, pawn + netvars::pawn::m_vOldOrigin);
+    }
+
+    const Vec3 viewOffset = mem::read<Vec3>(proc, pawn + netvars::pawn::m_vecViewOffset);
+    headPos = origin + viewOffset;
+
+    return std::isfinite(origin.x) && std::isfinite(origin.y) && std::isfinite(origin.z)
+        && std::isfinite(headPos.x) && std::isfinite(headPos.y) && std::isfinite(headPos.z);
+}
+
+static int espAnchorOffsetSource(EspAnchor anchor) {
+    switch (anchor) {
+    case EspAnchor::Bottom:       return static_cast<int>(EspAnchor::Top);
+    case EspAnchor::BottomLeft:   return static_cast<int>(EspAnchor::TopLeft);
+    case EspAnchor::BottomRight:  return static_cast<int>(EspAnchor::TopRight);
+    case EspAnchor::Right:        return static_cast<int>(EspAnchor::Left);
+    default:                      return static_cast<int>(anchor);
+    }
+}
+
+static void applyEspAnchorOffset(EspAnchor anchor, float& outX, float& outY) {
+    const int src = espAnchorOffsetSource(anchor);
+    outX += g_cfg.espAnchorOffsetX[(size_t)src];
+    const float oy = g_cfg.espAnchorOffsetY[(size_t)src];
+    switch (anchor) {
+    case EspAnchor::Bottom:
+    case EspAnchor::BottomLeft:
+    case EspAnchor::BottomRight:
+        outY -= oy;
+        break;
+    default:
+        outY += oy;
+        break;
+    }
+}
+
 static EspAnchor sanitizeInfoAnchor(EspAnchor anchor) {
     switch (anchor) {
     case EspAnchor::Top:
@@ -157,9 +233,34 @@ static float approxTextWidth(const char* text, float size) {
     return static_cast<float>(std::strlen(text)) * size * 0.56f;
 }
 
+static bool espPerfLite() {
+    return false;
+}
+
+static bool espPerfMinimal() {
+    return false;
+}
+
+static bool playerOnScreen(const Vec2& feet, const Vec2& head, float sw, float sh, float margin) {
+    const float minX = (std::min)(feet.x, head.x);
+    const float maxX = (std::max)(feet.x, head.x);
+    const float minY = (std::min)(feet.y, head.y);
+    const float maxY = (std::max)(feet.y, head.y);
+    return maxX >= -margin && minX <= sw + margin && maxY >= -margin && minY <= sh + margin;
+}
+
 // ─── Public ────────────────────────────────────────────────────────────────────
 
-void EspRenderer::render(Renderer& r, const EntityManager& em) {
+void EspRenderer::render(Renderer& r, const EntityManager& em, Process& proc) {
+    overlay_metrics::onEspRenderBegin();
+
+    const std::uint64_t entityTick = em.lastUpdateTickMs();
+    if (entityTick > 0) {
+        const std::uint64_t nowTick = GetTickCount64();
+        overlay_metrics::setEntityDataAgeMs(
+            static_cast<float>(nowTick >= entityTick ? nowTick - entityTick : 0));
+    }
+
     const bool renderPlayers = g_cfg.espEnabled && (
         g_cfg.boxEnabled       || g_cfg.boxOccluded
         || g_cfg.hpBarEnabled  || g_cfg.hpBarOccluded
@@ -168,76 +269,248 @@ void EspRenderer::render(Renderer& r, const EntityManager& em) {
         || g_cfg.chamsEnabled  || g_cfg.chamsOccluded
         || g_cfg.nameEspEnabled || g_cfg.armorEspEnabled
         || g_cfg.weaponEspEnabled || g_cfg.ammoEspEnabled || g_cfg.flagsEspEnabled);
-    const bool renderGrenades = g_cfg.espEnabled && g_cfg.grenadeEnabled;
+    const bool renderGrenades = g_cfg.grenadeTrajectory
+        || (g_cfg.espEnabled && g_cfg.grenadeEnabled);
     const bool renderBomb = g_cfg.bombTimerEnabled;
     const bool renderSpectatorList = g_cfg.spectatorListEnabled;
     const bool renderRadar = g_cfg.espEnabled && g_cfg.radarEnabled;
-    if (!renderPlayers && !renderGrenades && !renderBomb && !renderSpectatorList && !renderRadar)
+    const bool renderGrenadeHelper = g_cfg.grenadeHelperEnabled;
+    const bool renderSoundEsp = g_cfg.soundEspEnabled;
+    const bool renderAnything = renderPlayers || renderGrenades || renderBomb
+        || renderSpectatorList || renderRadar || g_cfg.showFpsWatermark
+        || g_cfg.grenadeTrajectory || renderGrenadeHelper || renderSoundEsp
+        || g_cfg.aimCalibrationActive || AimCalibration::instance().isActive();
+
+    if (!renderAnything) {
+        overlay_metrics::onEspRenderEnd();
         return;
+    }
 
     r.setImGuiDrawMode(true);
 
-    const auto snap = em.snapshot();
+    const auto frame = em.publishedFrame();
+    if (!frame) {
+        overlay_metrics::onEspRenderEnd();
+        return;
+    }
 
-    float sw = static_cast<float>(r.screenWidth());
-    float sh = static_cast<float>(r.screenHeight());
+    for (const auto& player : frame->players) {
+        if (!player.isValid)
+            continue;
+        if (player.isBot)
+            continue;
+        if (player.steamId != 0)
+            SteamAvatars::instance().request(player.steamId);
+    }
+    for (const auto& spectator : frame->spectators) {
+        if (!spectator.isValid || spectator.isBot)
+            continue;
+        if (spectator.steamId != 0)
+            SteamAvatars::instance().request(spectator.steamId);
+    }
+
+    ViewMatrix vm = frame->viewMatrix;
+    if (!readLiveViewMatrix(proc, em.clientBase(), vm))
+        vm = frame->viewMatrix;
+
+    const float sw = static_cast<float>(r.screenWidth());
+    const float sh = static_cast<float>(r.screenHeight());
+
+    if (g_cfg.aimCalibrationActive || AimCalibration::instance().isActive()) {
+        EntityManager::Snapshot calSnap = *frame;
+        calSnap.viewMatrix = vm;
+        AimCalibration::instance().render(r, calSnap, m_font);
+        drawFpsWatermark(r, sw, sh, calSnap);
+        r.setImGuiDrawMode(false);
+        overlay_metrics::onEspRenderEnd();
+        return;
+    }
 
     if (renderPlayers) {
-        // Take a consistent snapshot so all draw calls use the same frame's data.
-        const auto& players = snap.players;
-        const auto& vm = snap.viewMatrix;
-        const int localTeam = snap.localTeam;
+        const auto& players = frame->players;
+        const int localTeam = frame->localTeam;
+        const float cullMargin = espPerfLite() ? 24.f : 64.f;
+        const bool wantChams = g_cfg.chamsEnabled || g_cfg.chamsOccluded;
+        const bool wantSkel = g_cfg.skeletonEnabled || g_cfg.skeletonOccluded;
+        const bool kernelEsp = proc.usesKernelMemory();
+
+        ViewMatrix playerVm = vm;
+        readLiveViewMatrix(proc, em.clientBase(), playerVm);
 
         for (const auto& player : players) {
             if (!player.isValid || !player.isAlive)
                 continue;
             if (player.isLocalPlayer)
                 continue;
-            if (!player.screenRelevant)
-                continue;
             if (player.isDormant)
                 continue;
             if (g_cfg.enemyOnly && player.teamNum == localTeam)
                 continue;
 
-            Vec3 predDelta{};
-            if (g_cfg.latencyMode == 2) {
-                constexpr float kPredictSec = 0.020f;
-                predDelta = player.velocity * kPredictSec;
-            }
+            Vec3 origin = player.origin;
+            Vec3 headPos = player.headPos;
+            if (kernelEsp)
+                refreshLivePlayerAnchor(proc, player.pawn, origin, headPos);
+
+            const Vec3 anchorDelta{
+                origin.x - player.origin.x,
+                origin.y - player.origin.y,
+                origin.z - player.origin.z,
+            };
 
             Vec2 feetSc, headSc;
-            Vec3 projOrigin = player.origin + predDelta;
-            Vec3 projHead = player.headPos + predDelta;
-            if (!vm.worldToScreen(projOrigin, feetSc, sw, sh)) continue;
-            if (!vm.worldToScreen(projHead, headSc, sw, sh)) continue;
-            float bodyH = feetSc.y - headSc.y;
+            if (!playerVm.worldToScreen(origin, feetSc, sw, sh)) continue;
+            if (!playerVm.worldToScreen(headPos, headSc, sw, sh)) continue;
+            if (!playerOnScreen(feetSc, headSc, sw, sh, cullMargin))
+                continue;
+
+            const float bodyH = feetSc.y - headSc.y;
             if (bodyH < 5.f) continue;
 
             const bool occ = g_cfg.visibilityCheckEnabled
                           && player.visibilityChecked && !player.isVisible;
 
-            if (occ ? g_cfg.chamsOccluded : g_cfg.chamsEnabled)
-                drawChams(r, player, vm, occ, feetSc, headSc, sw, sh, predDelta);
+            const bool drawDetail = !espPerfMinimal() || bodyH >= 36.f;
+            if (wantChams)
+                drawChams(r, player, playerVm, feetSc, headSc, sw, sh, anchorDelta);
 
-            if (occ ? g_cfg.skeletonOccluded : g_cfg.skeletonEnabled)
-                drawSkeleton(r, player, vm, occ, feetSc, headSc, predDelta);
+            if (wantSkel && drawDetail && (!espPerfLite() || bodyH >= 28.f))
+                drawSkeleton(r, player, playerVm, occ, feetSc, headSc, anchorDelta);
 
-            drawPlayerBox(r, player, vm, localTeam, occ, feetSc, headSc, sw, sh, predDelta);
+            drawPlayerBox(r, player, playerVm, localTeam, occ, feetSc, headSc, sw, sh, {});
         }
     }
 
     // Draw grenades last so labels appear above player boxes.
     if (renderGrenades)
-        drawGrenades(r, snap);
+        drawGrenades(r, *frame, vm);
+
+    m_soundEsp.update(*frame);
+    if (renderSoundEsp)
+        m_soundEsp.render(r, vm, m_font);
+
+    if (renderGrenadeHelper)
+        m_grenadeHelper.render(r, *frame, vm, m_font);
 
     if (renderBomb)
-        drawBomb(r, snap);
+        drawBomb(r, *frame);
     if (renderSpectatorList)
-        drawSpectators(r, snap);
+        drawSpectators(r, *frame);
     if (renderRadar)
-        drawRadar(r, snap);
+        drawRadar(r, *frame);
+
+    drawFpsWatermark(r, sw, sh, *frame);
     r.setImGuiDrawMode(false);
+    overlay_metrics::onEspRenderEnd();
+}
+
+void EspRenderer::drawFpsWatermark(Renderer& r, float sw, float sh, const EntityManager::Snapshot& snap) {
+    if (!g_cfg.showFpsWatermark || !m_font)
+        return;
+
+    static float showT = 0.f;
+    static float fpsSmooth = 0.f;
+    static float pingSmooth = -1.f;
+    static auto lastTick = std::chrono::steady_clock::now();
+    static bool wasEnabled = false;
+
+    if (!wasEnabled) {
+        showT = 0.f;
+        fpsSmooth = 0.f;
+        pingSmooth = -1.f;
+    }
+    wasEnabled = true;
+
+    const auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - lastTick).count();
+    lastTick = now;
+    dt = std::clamp(dt, 0.f, 0.05f);
+
+    showT = (std::min)(1.f, showT + dt * 3.2f);
+
+    const float fps = overlay_metrics::overlayFps();
+    const int ping = snap.localPing;
+    if (fpsSmooth <= 1.f && fps > 1.f)
+        fpsSmooth = fps;
+    else if (fps > 1.f)
+        fpsSmooth += (fps - fpsSmooth) * (std::min)(1.f, dt * 9.f);
+
+    if (ping >= 0) {
+        if (pingSmooth < 0.f)
+            pingSmooth = static_cast<float>(ping);
+        else
+            pingSmooth += (static_cast<float>(ping) - pingSmooth) * (std::min)(1.f, dt * 7.f);
+    } else {
+        pingSmooth = -1.f;
+    }
+
+    const UserProfile& profile = userProfileGet();
+    const char* userRaw = profile.username.empty() ? "user" : profile.username.c_str();
+    char userBuf[48];
+    if (std::strlen(userRaw) > sizeof(userBuf) - 1) {
+        std::snprintf(userBuf, sizeof(userBuf), "%.44s...", userRaw);
+        userRaw = userBuf;
+    }
+
+    char fpsVal[16];
+    if (fpsSmooth > 1.f)
+        std::snprintf(fpsVal, sizeof(fpsVal), "%.0f", fpsSmooth);
+    else
+        std::snprintf(fpsVal, sizeof(fpsVal), "---");
+
+    char pingVal[16];
+    if (pingSmooth >= 0.f)
+        std::snprintf(pingVal, sizeof(pingVal), "%.0f ms", pingSmooth);
+    else
+        std::snprintf(pingVal, sizeof(pingVal), "---");
+
+    const float padX = 10.f;
+    const float padY = 7.f;
+    const float corner = 10.f;
+    const float logoSize = 34.f;
+    const float textSize = 18.f;
+    const float itemGap = 14.f;
+    const float ease = 1.f - std::pow(1.f - showT, 3.f);
+    const float slideX = (1.f - ease) * 24.f;
+    const unsigned int panelAlpha = (unsigned int)(242.f * ease);
+    const unsigned int shadowAlpha = (unsigned int)(96.f * ease);
+
+    const bool hasLogo = m_brandLogoSrv && m_brandLogoW > 0 && m_brandLogoH > 0;
+    const float logoBlock = hasLogo ? logoSize + itemGap : 0.f;
+    char brandText[64];
+    std::snprintf(brandText, sizeof(brandText), "crymore.pw v%s", crymore_build::kVersion);
+    const float brandW = approxTextWidth(brandText, textSize);
+    const float fpsW = approxTextWidth(fpsVal, textSize);
+    const float pingW = approxTextWidth(pingVal, textSize);
+    const float mapW = approxTextWidth(userRaw, textSize);
+
+    const float contentW = logoBlock + brandW + itemGap
+        + fpsW + itemGap + pingW + itemGap + mapW;
+    const float rowH = (std::max)(logoSize, textSize + 2.f);
+    const float panelW = padX * 2.f + contentW;
+    const float panelH = padY * 2.f + rowH;
+    const float x = sw - panelW - 16.f + slideX;
+    const float y = 14.f;
+    const float textY = y + padY + (rowH - textSize) * 0.5f - 1.f;
+
+    r.drawRoundedFilledRect(x + 1.f, y + 2.f, panelW, panelH, withAlpha(0xFF000000, shadowAlpha), corner);
+    r.drawRoundedFilledRect(x, y, panelW, panelH, withAlpha(Theme::BG, panelAlpha), corner);
+    r.drawRoundedRect(x, y, panelW, panelH, withAlpha(Theme::BORDER, panelAlpha), corner, 1.f);
+
+    float cx = x + padX;
+    if (hasLogo) {
+        r.drawImage(m_brandLogoSrv, cx, y + (panelH - logoSize) * 0.5f, logoSize, logoSize,
+                    withAlpha(0xFFFFFFFF, panelAlpha));
+        cx += logoBlock;
+    }
+
+    r.drawText(*m_font, cx, textY, brandText, withAlpha(Theme::TEXT_LINK, panelAlpha), textSize);
+    cx += brandW + itemGap;
+    r.drawText(*m_font, cx, textY, fpsVal, withAlpha(Theme::TEXT, panelAlpha), textSize);
+    cx += fpsW + itemGap;
+    r.drawText(*m_font, cx, textY, pingVal, withAlpha(Theme::TEXT, panelAlpha), textSize);
+    cx += pingW + itemGap;
+    r.drawText(*m_font, cx, textY, userRaw, withAlpha(Theme::TEXT_MUTED, panelAlpha), textSize);
 }
 
 // Forward declaration — defined in colour utilities section below.
@@ -260,10 +533,20 @@ void EspRenderer::drawPlayerBox(Renderer& r,
     float boxH = feetSc.y - headSc.y;
     if (boxH < 5.f) return;
 
-    float boxW = boxH * 0.5f;
-    float boxX = feetSc.x - boxW * 0.5f;
-    float boxY = headSc.y - boxH * 0.04f;
-    boxH += boxH * 0.04f;
+    const float rawH = boxH;
+    const float padTop = rawH * 0.14f;
+    const float padBottom = rawH * 0.10f;
+    const float sidePad = rawH * 0.10f;
+    boxH = rawH + padTop + padBottom;
+    float boxW = (rawH * 0.48f + sidePad * 2.f) * std::clamp(g_cfg.boxWidthScale, 0.35f, 2.5f);
+    const float centerX = (feetSc.x + headSc.x) * 0.5f;
+    const float xSkew = std::abs(feetSc.x - headSc.x);
+    if (xSkew > 2.f) {
+        const float skewFactor = std::clamp(xSkew / (std::max)(rawH * 0.42f, 10.f), 0.f, 0.45f);
+        boxW *= (1.f + skewFactor);
+    }
+    float boxX = centerX - boxW * 0.5f;
+    float boxY = headSc.y - padTop;
 
     (void)localTeam;
     const float* boxCol = occ ? g_cfg.boxOccludedColor : g_cfg.boxVisibleColor;
@@ -276,85 +559,516 @@ void EspRenderer::drawPlayerBox(Renderer& r,
     drawPlayerInfo(r, player, boxX, boxY, boxW, boxH, occ);
 }
 
+static unsigned int scaleArgbAlpha(unsigned int col, float mul) {
+    const unsigned int a = static_cast<unsigned int>(
+        (std::min)(255.f, static_cast<float>((col >> 24) & 0xFF) * mul));
+    return (col & 0x00FFFFFFu) | (a << 24);
+}
+
+static bool projectChamsBone(const ViewMatrix& vm, const Vec3& bone, const Vec3& predDelta,
+                             float sw, float sh, Vec2& out) {
+    Vec3 world = bone + predDelta;
+    if (!vm.worldToScreen(world, out, sw, sh))
+        return false;
+    return std::isfinite(out.x) && std::isfinite(out.y);
+}
+
+static void drawChamsCapsule2D(Renderer& r, const Vec2& a, const Vec2& b,
+                               float radius, unsigned int col) {
+    if (radius < 0.75f)
+        return;
+
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float lenSq = dx * dx + dy * dy;
+    if (lenSq < 1.f) {
+        r.drawFilledCircle(a.x, a.y, radius, col);
+        return;
+    }
+
+    const float len = std::sqrtf(lenSq);
+    const float nx = -dy / len * radius;
+    const float ny =  dx / len * radius;
+
+    const float quad[] = {
+        a.x + nx, a.y + ny,
+        a.x - nx, a.y - ny,
+        b.x - nx, b.y - ny,
+        b.x + nx, b.y + ny,
+    };
+    r.drawFilledConvexPolygon(quad, 4, col);
+    r.drawFilledCircle(a.x, a.y, radius, col);
+    r.drawFilledCircle(b.x, b.y, radius, col);
+}
+
+static void drawChamsTorso(Renderer& r, const Vec2& lShoulder, const Vec2& rShoulder,
+                           const Vec2& lHip, const Vec2& rHip, unsigned int col) {
+    const float torso[] = {
+        lShoulder.x, lShoulder.y,
+        rShoulder.x, rShoulder.y,
+        rHip.x, rHip.y,
+        lHip.x, lHip.y,
+    };
+    r.drawFilledConvexPolygon(torso, 4, col);
+}
+
+static bool chamsMainVisFallback(const PlayerData& player) {
+    return !g_cfg.visibilityCheckEnabled || !player.visibilityChecked || player.isVisible;
+}
+
+static unsigned int chamsApplyCenterFade(unsigned int col, float x, float y, float sw, float sh) {
+    constexpr float kFadeRadius = 22.f;
+    const float cx = sw * 0.5f;
+    const float cy = sh * 0.5f;
+    const float dist = std::hypotf(x - cx, y - cy);
+    if (dist >= kFadeRadius)
+        return col;
+    const float t = dist / kFadeRadius;
+    const float mul = 0.35f + 0.65f * t;
+    return scaleArgbAlpha(col, mul);
+}
+
+static void drawChamsSolidCapsule2D(Renderer& r, const Vec2& a, const Vec2& b,
+                                    float radius, unsigned int col, float sw, float sh) {
+    if (((col >> 24) & 0xFF) == 0)
+        return;
+
+    if (espPerfMinimal()) {
+        drawChamsCapsule2D(r, a, b, radius, col);
+        return;
+    }
+
+    const Vec2 mid = { (a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f };
+    const unsigned int faded = espPerfLite()
+        ? col
+        : chamsApplyCenterFade(col, mid.x, mid.y, sw, sh);
+
+    if (espPerfLite()) {
+        drawChamsCapsule2D(r, a, b, radius, faded);
+        return;
+    }
+
+    const unsigned int outer = scaleArgbAlpha(faded, 0.38f);
+    const unsigned int core = scaleArgbAlpha(faded, 1.0f);
+    const unsigned int rim = scaleArgbAlpha(faded, 1.15f);
+
+    drawChamsCapsule2D(r, a, b, radius * 1.28f, outer);
+    drawChamsCapsule2D(r, a, b, radius, core);
+    drawChamsCapsule2D(r, a, b, radius * 0.72f, rim);
+}
+
+static bool chamsBoneVisible(const PlayerData& player, int boneIndex) {
+    if (boneIndex < 0 || boneIndex >= PlayerData::kBoneCount)
+        return chamsMainVisFallback(player);
+    if (!player.chamsPartVisChecked)
+        return chamsMainVisFallback(player);
+    return player.chamsPartVisible[boneIndex];
+}
+
+static void drawChamsBodyStyle(Renderer& r,
+                               const PlayerData& player,
+                               const Vec2* bones, const bool* boneOk,
+                               float bodyH,
+                               unsigned int visCol,
+                               unsigned int occCol,
+                               bool drawVisible,
+                               bool drawOccluded,
+                               float sw, float sh)
+{
+    auto boneRadius = [&](float frac) {
+        return std::clamp(bodyH * frac, 3.f, 28.f);
+    };
+
+    auto drawCapsuleCol = [&](const Vec2& a, const Vec2& b, float radius, unsigned int col) {
+        drawChamsSolidCapsule2D(r, a, b, radius, col, sw, sh);
+    };
+
+    struct LimbSeg { int a; int b; int mid; float rf; };
+    static constexpr LimbSeg kLegSegs[] = {
+        { 0, 22, 0, 0.088f }, { 22, 23, 1, 0.078f }, { 23, 24, 2, 0.068f },
+        { 0, 25, 3, 0.088f }, { 25, 26, 4, 0.078f }, { 26, 27, 5, 0.068f },
+    };
+    static constexpr LimbSeg kArmSegs[] = {
+        { 5, 8, 6, 0.072f }, { 8, 9, 7, 0.064f }, { 9, 11, 8, 0.056f },
+        { 5, 13, 9, 0.072f }, { 13, 14, 10, 0.064f }, { 14, 16, 11, 0.056f },
+    };
+    static constexpr LimbSeg kSpineSegs[] = {
+        { 0, 2, 12, 0.098f }, { 2, 4, 13, 0.104f }, { 4, 5, 14, 0.094f }, { 5, 6, 15, 0.082f },
+    };
+
+    const float maxSegLen = bodyH * 0.72f;
+    const float maxSegLenSq = maxSegLen * maxSegLen;
+
+    auto drawClippedSegment = [&](int a, int b, int midSlot, float radiusFrac, bool occPass) {
+        if (!boneOk[a] || !boneOk[b])
+            return;
+        const float dx = bones[b].x - bones[a].x;
+        const float dy = bones[b].y - bones[a].y;
+        if (dx * dx + dy * dy > maxSegLenSq)
+            return;
+
+        const Vec2 sm = {
+            (bones[a].x + bones[b].x) * 0.5f,
+            (bones[a].y + bones[b].y) * 0.5f,
+        };
+        const float rad = boneRadius(radiusFrac);
+
+        const bool va = chamsBoneVisible(player, a);
+        const bool vb = chamsBoneVisible(player, b);
+        const bool vm = player.chamsPartVisChecked
+            ? player.chamsSegMidVisible[midSlot]
+            : (va || vb);
+
+        auto drawSpan = [&](const Vec2& p0, const Vec2& p1, bool vis) {
+            if (vis) {
+                if (!occPass && drawVisible)
+                    drawCapsuleCol(p0, p1, rad, visCol);
+            } else if (occPass && drawOccluded) {
+                drawCapsuleCol(p0, p1, rad, occCol);
+            }
+        };
+
+        drawSpan(bones[a], sm, va && vm);
+        drawSpan(sm, bones[b], vm && vb);
+        if (va && vb && vm) {
+            if (!occPass && drawVisible)
+                drawCapsuleCol(bones[a], bones[b], rad, visCol);
+        } else if (!va && !vb && !vm) {
+            if (occPass && drawOccluded)
+                drawCapsuleCol(bones[a], bones[b], rad, occCol);
+        }
+    };
+
+    auto drawAllSegments = [&](bool occPass) {
+        for (const auto& seg : kLegSegs)
+            drawClippedSegment(seg.a, seg.b, seg.mid, seg.rf, occPass);
+        for (const auto& seg : kArmSegs)
+            drawClippedSegment(seg.a, seg.b, seg.mid, seg.rf, occPass);
+        for (const auto& seg : kSpineSegs)
+            drawClippedSegment(seg.a, seg.b, seg.mid, seg.rf, occPass);
+    };
+
+    if (boneOk[8] && boneOk[13] && boneOk[22] && boneOk[25]) {
+        const bool vLS = chamsBoneVisible(player, 8);
+        const bool vRS = chamsBoneVisible(player, 13);
+        const bool vLH = chamsBoneVisible(player, 22);
+        const bool vRH = chamsBoneVisible(player, 25);
+        const int visCorners = (vLS ? 1 : 0) + (vRS ? 1 : 0) + (vLH ? 1 : 0) + (vRH ? 1 : 0);
+        const Vec2 center = {
+            (bones[8].x + bones[13].x + bones[22].x + bones[25].x) * 0.25f,
+            (bones[8].y + bones[13].y + bones[22].y + bones[25].y) * 0.25f,
+        };
+
+        auto drawTorsoCol = [&](unsigned int col) {
+            if (((col >> 24) & 0xFF) == 0)
+                return;
+            const unsigned int faded = chamsApplyCenterFade(col, center.x, center.y, sw, sh);
+            const unsigned int outer = scaleArgbAlpha(faded, 0.34f);
+            drawChamsTorso(r, bones[8], bones[13], bones[22], bones[25], outer);
+            drawChamsTorso(r, bones[8], bones[13], bones[22], bones[25], faded);
+        };
+
+        auto tri = [&](const Vec2& p0, const Vec2& p1, bool v0, bool v1, unsigned int col) {
+            if (((col >> 24) & 0xFF) == 0 || (!v0 && !v1))
+                return;
+            const Vec2 triCenter = {
+                (p0.x + p1.x + center.x) / 3.f,
+                (p0.y + p1.y + center.y) / 3.f,
+            };
+            const unsigned int faded = chamsApplyCenterFade(col, triCenter.x, triCenter.y, sw, sh);
+            const float triPts[] = { p0.x, p0.y, p1.x, p1.y, center.x, center.y };
+            r.drawFilledConvexPolygon(triPts, 3, faded);
+        };
+
+        if (drawOccluded) {
+            if (visCorners == 0)
+                drawTorsoCol(occCol);
+            else if (visCorners > 0 && visCorners < 4) {
+                tri(bones[8], bones[13], !vLS, !vRS, occCol);
+                tri(bones[13], bones[25], !vRS, !vRH, occCol);
+                tri(bones[25], bones[22], !vRH, !vLH, occCol);
+                tri(bones[22], bones[8], !vLH, !vLS, occCol);
+            }
+        }
+        if (drawVisible) {
+            if (visCorners >= 3)
+                drawTorsoCol(visCol);
+            else if (visCorners > 0 && visCorners < 3) {
+                tri(bones[8], bones[13], vLS, vRS, visCol);
+                tri(bones[13], bones[25], vRS, vRH, visCol);
+                tri(bones[25], bones[22], vRH, vLH, visCol);
+                tri(bones[22], bones[8], vLH, vLS, visCol);
+            }
+        }
+    }
+
+    drawAllSegments(true);
+    drawAllSegments(false);
+
+    if (boneOk[6]) {
+        const bool headVis = chamsBoneVisible(player, 6);
+        float headR = boneRadius(0.132f);
+        if (boneOk[5]) {
+            const float neckDist = std::hypotf(bones[6].x - bones[5].x, bones[6].y - bones[5].y);
+            headR = (std::max)(headR, neckDist * 1.05f);
+        }
+        unsigned int headCol = 0;
+        if (headVis && drawVisible)
+            headCol = visCol;
+        else if (!headVis && drawOccluded)
+            headCol = occCol;
+        if (headCol) {
+            const unsigned int faded = chamsApplyCenterFade(headCol, bones[6].x, bones[6].y, sw, sh);
+            const unsigned int glowCol = scaleArgbAlpha(faded, 0.42f);
+            const unsigned int coreCol = scaleArgbAlpha(faded, 1.0f);
+            const unsigned int outlineCol = scaleArgbAlpha(faded, 1.2f);
+            r.drawFilledCircle(bones[6].x, bones[6].y, headR * 1.24f, glowCol);
+            r.drawFilledCircle(bones[6].x, bones[6].y, headR, coreCol);
+            r.drawFilledCircle(bones[6].x, bones[6].y, headR * 0.58f, outlineCol);
+            r.drawCircle(bones[6].x, bones[6].y, headR, outlineCol, 1.5f);
+        }
+    }
+}
+
+static void drawChamsCapsuleOutline2D(Renderer& r, const Vec2& a, const Vec2& b,
+                                      float radius, unsigned int col, float thickness) {
+    if (radius < 0.75f || ((col >> 24) & 0xFF) == 0)
+        return;
+
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float lenSq = dx * dx + dy * dy;
+    if (lenSq < 1.f) {
+        r.drawCircle(a.x, a.y, radius, col, thickness);
+        return;
+    }
+
+    const float len = std::sqrtf(lenSq);
+    const float nx = -dy / len * radius;
+    const float ny =  dx / len * radius;
+
+    r.drawLine(a.x + nx, a.y + ny, b.x + nx, b.y + ny, col, thickness);
+    r.drawLine(a.x - nx, a.y - ny, b.x - nx, b.y - ny, col, thickness);
+    r.drawCircle(a.x, a.y, radius, col, thickness);
+    r.drawCircle(b.x, b.y, radius, col, thickness);
+}
+
+static void drawChamsSilhouette2D(Renderer& r,
+                                  const Vec2* bones, const bool* boneOk, float bodyH,
+                                  unsigned int fillCol, unsigned int outlineCol) {
+    if (((fillCol >> 24) & 0xFF) == 0)
+        return;
+
+    auto boneRadius = [&](float frac) {
+        return std::clamp(bodyH * frac * 0.88f, 3.f, 24.f);
+    };
+
+    struct LimbSeg { int a; int b; float rf; };
+    static constexpr LimbSeg kSegments[] = {
+        { 0, 22, 0.088f }, { 22, 23, 0.074f }, { 23, 24, 0.060f },
+        { 0, 25, 0.088f }, { 25, 26, 0.074f }, { 26, 27, 0.060f },
+        { 5, 8, 0.070f },  { 8, 9, 0.058f },  { 9, 11, 0.050f },
+        { 5, 13, 0.070f }, { 13, 14, 0.058f }, { 14, 16, 0.050f },
+        { 0, 2, 0.098f },  { 2, 4, 0.106f }, { 4, 5, 0.096f }, { 5, 6, 0.072f },
+    };
+
+    const float maxSegLen = bodyH * 0.72f;
+    const float maxSegLenSq = maxSegLen * maxSegLen;
+    const unsigned int solidFill = scaleArgbAlpha(fillCol, 0.68f);
+    const unsigned int edgeCol = scaleArgbAlpha(outlineCol, 1.25f);
+    constexpr float kEdgeThk = 1.6f;
+
+    auto drawSegmentFill = [&](int a, int b, float radiusFrac) {
+        if (!boneOk[a] || !boneOk[b])
+            return;
+        const float dx = bones[b].x - bones[a].x;
+        const float dy = bones[b].y - bones[a].y;
+        if (dx * dx + dy * dy > maxSegLenSq)
+            return;
+        drawChamsCapsule2D(r, bones[a], bones[b], boneRadius(radiusFrac), solidFill);
+    };
+
+    for (const auto& seg : kSegments)
+        drawSegmentFill(seg.a, seg.b, seg.rf);
+
+    if (boneOk[6]) {
+        float headR = boneRadius(0.118f);
+        if (boneOk[5]) {
+            const float neckDist = std::hypotf(bones[6].x - bones[5].x, bones[6].y - bones[5].y);
+            headR = (std::max)(headR, neckDist * 0.92f);
+        }
+        r.drawFilledCircle(bones[6].x, bones[6].y, headR, solidFill);
+    }
+
+    thread_local std::vector<Vec2> boundaryPts;
+    boundaryPts.clear();
+    boundaryPts.reserve(96);
+
+    auto addPoint = [&](float x, float y) {
+        if (std::isfinite(x) && std::isfinite(y))
+            boundaryPts.push_back({ x, y });
+    };
+
+    auto addCapsuleOutlinePts = [&](int a, int b, float radiusFrac) {
+        if (!boneOk[a] || !boneOk[b])
+            return;
+        const float dx = bones[b].x - bones[a].x;
+        const float dy = bones[b].y - bones[a].y;
+        if (dx * dx + dy * dy > maxSegLenSq)
+            return;
+        const float len = std::sqrtf(dx * dx + dy * dy);
+        if (len < 1.f)
+            return;
+        const float nx = -dy / len;
+        const float ny = dx / len;
+        const float ux = dx / len;
+        const float uy = dy / len;
+        const float rad = boneRadius(radiusFrac);
+        constexpr int kRing = 6;
+        for (int end = 0; end < 2; ++end) {
+            const float px = end == 0 ? bones[a].x : bones[b].x;
+            const float py = end == 0 ? bones[a].y : bones[b].y;
+            for (int i = 0; i < kRing; ++i) {
+                const float ang = (static_cast<float>(i) / static_cast<float>(kRing)) * 6.2831853f;
+                addPoint(px + (std::cosf(ang) * nx + std::sinf(ang) * ux) * rad,
+                         py + (std::cosf(ang) * ny + std::sinf(ang) * uy) * rad);
+            }
+        }
+    };
+
+    for (const auto& seg : kSegments)
+        addCapsuleOutlinePts(seg.a, seg.b, seg.rf);
+
+    if (boneOk[6]) {
+        float headR = boneRadius(0.118f);
+        if (boneOk[5]) {
+            const float neckDist = std::hypotf(bones[6].x - bones[5].x, bones[6].y - bones[5].y);
+            headR = (std::max)(headR, neckDist * 0.92f);
+        }
+        constexpr int kHeadPts = 12;
+        for (int i = 0; i < kHeadPts; ++i) {
+            const float a = (static_cast<float>(i) / static_cast<float>(kHeadPts)) * 6.2831853f;
+            addPoint(bones[6].x + std::cosf(a) * headR, bones[6].y + std::sinf(a) * headR);
+        }
+    }
+
+    if (boundaryPts.size() < 3)
+        return;
+
+    float centroidX = 0.f;
+    float centroidY = 0.f;
+    for (const Vec2& p : boundaryPts) {
+        centroidX += p.x;
+        centroidY += p.y;
+    }
+    centroidX /= static_cast<float>(boundaryPts.size());
+    centroidY /= static_cast<float>(boundaryPts.size());
+
+    constexpr int kDirs = 64;
+    thread_local std::vector<Vec2> outline;
+    outline.clear();
+    outline.resize(static_cast<size_t>(kDirs));
+
+    for (int i = 0; i < kDirs; ++i) {
+        const float angle = (static_cast<float>(i) / static_cast<float>(kDirs)) * 6.2831853f;
+        const float dirX = std::cosf(angle);
+        const float dirY = std::sinf(angle);
+        float bestProj = -1.f;
+        Vec2 bestPt{ centroidX, centroidY };
+        for (const Vec2& p : boundaryPts) {
+            const float dx = p.x - centroidX;
+            const float dy = p.y - centroidY;
+            const float proj = dx * dirX + dy * dirY;
+            if (proj > bestProj) {
+                bestProj = proj;
+                bestPt = p;
+            }
+        }
+        outline[static_cast<size_t>(i)] = bestPt;
+    }
+
+    for (size_t i = 0; i < outline.size(); ++i) {
+        const Vec2& a = outline[i];
+        const Vec2& b = outline[(i + 1) % outline.size()];
+        r.drawLine(a.x, a.y, b.x, b.y, edgeCol, kEdgeThk);
+    }
+}
+
 // ─── drawChams ──────────────────────────────────────────────────────────────────────────
 void EspRenderer::drawChams(Renderer& r,
                              const PlayerData& player,
                              const ViewMatrix& vm,
-                             bool occ,
                              const Vec2& feetSc,
                              const Vec2& headSc,
                              float sw, float sh,
                              const Vec3& predDelta)
 {
-    float bh = feetSc.y - headSc.y;
-    if (bh < 5.f) return;
-    float bw = bh * 0.5f;
-    float bx = feetSc.x - bw * 0.5f;
-    float by = headSc.y;
+    const float bodyH = feetSc.y - headSc.y;
+    if (bodyH < 5.f)
+        return;
 
-    const float* base = occ ? g_cfg.chamsOccludedColor : g_cfg.chamsVisibleColor;
-    const float alpha = std::clamp(base[3] * g_cfg.chamsAlpha, 0.f, 1.f);
-    float colRgba[4] = { base[0], base[1], base[2], alpha };
-    unsigned int col = rgbaToArgb(colRgba);
+    bool drawVisible = g_cfg.chamsEnabled;
+    bool drawOccluded = g_cfg.chamsOccluded && g_cfg.visibilityCheckEnabled;
 
-    if (player.bonesValid) {
-        static constexpr int kHullBones[] = {
-            0, 2, 4, 5, 6,
-            8, 9, 11,
-            13, 14, 16,
-            22, 23, 24,
-            25, 26, 27
-        };
-        const float mx = bw * 1.15f;
-        const float my = bh * 0.28f;
+    if (g_cfg.visibilityCheckEnabled && player.visibilityChecked) {
+        const float conf = player.visibilityConfidence;
+        if (!player.isVisible && conf < 0.22f)
+            drawVisible = false;
+        else if (player.isVisible && conf > 0.88f)
+            drawOccluded = false;
+    }
 
-        Vec2 raw[PlayerData::kBoneCount];
-        int nRaw = 0;
-        raw[nRaw++] = headSc;
-        raw[nRaw++] = Vec2(feetSc.x - bw * 0.22f, feetSc.y);
-        raw[nRaw++] = Vec2(feetSc.x + bw * 0.22f, feetSc.y);
-        for (int boneIndex : kHullBones) {
-            Vec3 d = player.bones[boneIndex] - player.origin;
-            if (d.x*d.x + d.y*d.y + d.z*d.z > 80.f * 80.f) continue;
-            Vec2 sp;
-            Vec3 boneWorld = player.bones[boneIndex] + predDelta;
-            if (!vm.worldToScreen(boneWorld, sp, sw, sh)) continue;
-            if (sp.x < bx - mx || sp.x > bx + bw + mx) continue;
-            if (sp.y < by - my || sp.y > by + bh + my) continue;
-            raw[nRaw++] = Vec2(sp.x, sp.y);
-        }
+    const float visAlpha = std::clamp(g_cfg.chamsVisibleColor[3] * g_cfg.chamsAlpha, 0.08f, 1.f);
+    const float occAlpha = std::clamp(g_cfg.chamsOccludedColor[3] * g_cfg.chamsAlpha, 0.06f, 1.f);
 
-        if (nRaw >= 3) {
-            Vec2 hull[PlayerData::kBoneCount];
-            int hc = jarvisHull(raw, nRaw, hull);
+    const float visRgba[4] = {
+        g_cfg.chamsVisibleColor[0],
+        g_cfg.chamsVisibleColor[1],
+        g_cfg.chamsVisibleColor[2],
+        visAlpha
+    };
+    const float occRgba[4] = {
+        g_cfg.chamsOccludedColor[0],
+        g_cfg.chamsOccludedColor[1],
+        g_cfg.chamsOccludedColor[2],
+        occAlpha
+    };
+    const unsigned int visCol = rgbaToArgb(visRgba);
+    const unsigned int occCol = rgbaToArgb(occRgba);
 
-            if (hc >= 3) {
-                float hcx = 0.f, hcy = 0.f;
-                for (int i = 0; i < hc; ++i) { hcx += hull[i].x; hcy += hull[i].y; }
-                hcx /= (float)hc; hcy /= (float)hc;
+    if (!drawVisible && !drawOccluded)
+        return;
 
-                float kExpand = std::clamp(bh * 0.028f, 5.f, 11.f);
-                for (int i = 0; i < hc; ++i) {
-                    float dx = hull[i].x - hcx, dy = hull[i].y - hcy;
-                    float len = sqrtf(dx*dx + dy*dy);
-                    if (len > 0.5f) {
-                        hull[i].x += dx / len * kExpand;
-                        hull[i].y += dy / len * kExpand;
-                    }
-                }
+    if (!player.bonesValid)
+        return;
 
-                float hullPts[PlayerData::kBoneCount * 2];
-                for (int i = 0; i < hc; ++i) {
-                    hullPts[i*2]   = hull[i].x;
-                    hullPts[i*2+1] = hull[i].y;
-                }
-                r.drawFilledConvexPolygon(hullPts, hc, col);
+    Vec2 bones[PlayerData::kBoneCount]{};
+    bool boneOk[PlayerData::kBoneCount]{};
+    for (int i = 0; i < PlayerData::kBoneCount; ++i)
+        boneOk[i] = projectChamsBone(vm, player.bones[i], predDelta, sw, sh, bones[i]);
+
+    static ChamsMeshLibrary s_chamsMeshes;
+
+    if (g_cfg.chamsStyle == 1) {
+        s_chamsMeshes.initOnce();
+        if (s_chamsMeshes.ready()) {
+            if (s_chamsMeshes.drawPlayer(r, player, vm, visCol, occCol, drawVisible, drawOccluded, sw, sh, predDelta))
                 return;
-            }
         }
     }
 
-    r.drawFilledRect(bx, by, bw, bh, col);
+    if (g_cfg.chamsStyle == 2) {
+        const bool useVis = drawVisible && chamsMainVisFallback(player);
+        const bool useOcc = drawOccluded && g_cfg.visibilityCheckEnabled
+                         && player.visibilityChecked && !player.isVisible;
+        if (useOcc)
+            drawChamsSilhouette2D(r, bones, boneOk, bodyH, occCol, occCol);
+        if (useVis || (!useVis && !useOcc && drawVisible))
+            drawChamsSilhouette2D(r, bones, boneOk, bodyH, visCol, visCol);
+        return;
+    }
+
+    drawChamsBodyStyle(r, player, bones, boneOk, bodyH, visCol, occCol, drawVisible, drawOccluded, sw, sh);
 }
 
 static float measureTextNarrow(const FontAtlas* font, const char* text, float size) {
@@ -420,6 +1134,27 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
     const float textSizeInfo = std::clamp(g_cfg.infoTextSize, 10.f, 24.f);
     const float textSizeName = textSizeInfo + 1.f;
     const float leftX = boxX;
+    constexpr float kSideInset = 6.f;
+    const float layoutScale = std::clamp(boxH / 70.f, 0.34f, 1.15f);
+    const float topGap = 2.f * layoutScale;
+    const float topStackStep = (2.f * layoutScale);
+    const float topFarPullDown = (1.f - layoutScale) * 12.f;
+
+    auto finalizeSideTextX = [&](EspAnchor anchor, float actualW, float x) {
+        switch (anchor) {
+        case EspAnchor::Top:
+        case EspAnchor::Bottom:
+            return boxX + boxW * 0.5f - actualW * 0.5f;
+        case EspAnchor::TopLeft:
+        case EspAnchor::BottomLeft:
+            return boxX - actualW - kSideInset;
+        case EspAnchor::TopRight:
+        case EspAnchor::BottomRight:
+            return boxX + boxW + kSideInset;
+        default:
+            return x;
+        }
+    };
 
     auto drawOutlined = [&](float x, float y, const char* text, float size) {
         if (!text || !text[0])
@@ -439,23 +1174,21 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
 
     struct AnchorStack {
         float top = 0.f;
+        float topLeft = 0.f;
+        float topRight = 0.f;
         float bottom = 0.f;
         float left = 0.f;
         float right = 0.f;
-        float topLeft = 0.f;
-        float topRight = 0.f;
-        float bottomLeft = 0.f;
-        float bottomRight = 0.f;
     } stack;
 
     auto placeRect = [&](EspAnchor anchor, float w, float h, float& outX, float& outY) {
+        constexpr float kSideInset = 6.f;
         const float gap = 3.f;
-        const float sidePad = 6.f;
         switch (anchor) {
         case EspAnchor::Top:
-            outX = boxX + boxW * 0.5f - w * 0.5f;
-            outY = boxY - h - gap - stack.top;
-            stack.top += h + 1.f;
+            outX = (w > boxW * 0.92f) ? boxX : (boxX + boxW * 0.5f - w * 0.5f);
+            outY = boxY - h - topGap - stack.top + topFarPullDown;
+            stack.top += h + topStackStep;
             break;
         case EspAnchor::Bottom:
             outX = boxX + boxW * 0.5f - w * 0.5f;
@@ -463,41 +1196,39 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
             stack.bottom += h + 1.f;
             break;
         case EspAnchor::Left:
-            outX = boxX - w - sidePad - stack.left;
+            outX = boxX - w - kSideInset - stack.left;
             outY = boxY;
             stack.left += w + 2.f;
             break;
         case EspAnchor::Right:
-            outX = boxX + boxW + sidePad + stack.right;
+            outX = boxX + boxW + kSideInset + stack.right;
             outY = boxY;
             stack.right += w + 2.f;
             break;
         case EspAnchor::TopLeft:
-            outX = boxX - w - 4.f;
-            outY = boxY - h - gap - stack.topLeft;
-            stack.topLeft += h + 1.f;
+            outX = boxX - w - kSideInset;
+            outY = boxY - h - topGap - stack.topLeft + topFarPullDown;
+            stack.topLeft += h + topStackStep;
             break;
         case EspAnchor::TopRight:
-            outX = boxX + boxW + 4.f;
-            outY = boxY - h - gap - stack.topRight;
-            stack.topRight += h + 1.f;
+            outX = boxX + boxW + kSideInset;
+            outY = boxY - h - topGap - stack.topRight + topFarPullDown;
+            stack.topRight += h + topStackStep;
             break;
         case EspAnchor::BottomLeft:
-            outX = boxX - w - 4.f;
-            outY = boxY + boxH + gap + stack.bottomLeft;
-            stack.bottomLeft += h + 1.f;
+            outX = boxX - w - kSideInset;
+            outY = boxY + boxH + gap + stack.bottom;
+            stack.bottom += h + 1.f;
             break;
         case EspAnchor::BottomRight:
         default:
-            outX = boxX + boxW + 4.f;
-            outY = boxY + boxH + gap + stack.bottomRight;
-            stack.bottomRight += h + 1.f;
+            outX = boxX + boxW + kSideInset;
+            outY = boxY + boxH + gap + stack.bottom;
+            stack.bottom += h + 1.f;
             break;
         }
 
-        const int ai = std::clamp(static_cast<int>(anchor), 0, 7);
-        outX += g_cfg.espAnchorOffsetX[ai];
-        outY += g_cfg.espAnchorOffsetY[ai];
+        applyEspAnchorOffset(anchor, outX, outY);
     };
 
     struct RenderItem {
@@ -597,8 +1328,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
             float y = boxY;
             float actualW = measureTextNarrow(m_font, hpLabel, textSizeInfo);
             placeRect(anchor, approxTextWidth(hpLabel, textSizeInfo), textSizeInfo + 1.f, x, y);
-            if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                x = boxX + boxW * 0.5f - actualW * 0.5f;
+            x = finalizeSideTextX(anchor, actualW, x);
             drawOutlined(x, y, hpLabel, textSizeInfo);
             break;
         }
@@ -608,12 +1338,24 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
                 if (_strnicmp(displayName.c_str(), "bot ", 4) != 0)
                     displayName = "BOT " + displayName;
             }
+            const bool wantAvatar = g_cfg.nameEspAvatarEnabled && (player.isBot || player.steamId != 0);
+            ID3D11ShaderResourceView* avatarSrv = wantAvatar
+                ? SteamAvatars::instance().resolve(player.isBot, player.teamNum, player.steamId)
+                : nullptr;
+            const float avatarSize = textSizeName + 3.f;
+            const float avatarGap = 3.f;
+            const float avatarExtra = wantAvatar ? (avatarSize + avatarGap) : 0.f;
+            const float nameBlockH = wantAvatar ? (avatarSize + 2.f) : (textSizeName + 1.f);
             float x = leftX;
             float y = boxY;
             float actualW = measureTextNarrow(m_font, displayName.c_str(), textSizeName);
-            placeRect(anchor, approxTextWidth(displayName.c_str(), textSizeName), textSizeName + 1.f, x, y);
-            if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                x = boxX + boxW * 0.5f - actualW * 0.5f;
+            placeRect(anchor, approxTextWidth(displayName.c_str(), textSizeName) + avatarExtra,
+                      nameBlockH, x, y);
+            x = finalizeSideTextX(anchor, actualW + avatarExtra, x);
+            if (avatarSrv) {
+                drawSteamAvatar(r, avatarSrv, x, y - 1.f, avatarSize);
+                x += avatarExtra;
+            }
             drawOutlined(x, y, displayName.c_str(), textSizeName);
             break;
         }
@@ -622,8 +1364,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
             float y = boxY;
             float actualW = measureTextNarrow(m_font, player.weaponName.c_str(), textSizeInfo);
             placeRect(anchor, approxTextWidth(player.weaponName.c_str(), textSizeInfo), textSizeInfo + 1.f, x, y);
-            if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                x = boxX + boxW * 0.5f - actualW * 0.5f;
+            x = finalizeSideTextX(anchor, actualW, x);
             drawOutlined(x, y, player.weaponName.c_str(), textSizeInfo);
             break;
         }
@@ -637,8 +1378,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
                 const auto* g = m_font->glyph(glyph[0]);
                 if (g) actualW = g->advanceX * (iconSize / static_cast<float>(m_font->renderPx()));
                 placeRect(anchor, iconSize * 0.85f, iconSize, x, y);
-                if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                    x = boxX + boxW * 0.5f - actualW * 0.5f;
+                x = finalizeSideTextX(anchor, actualW, x);
                 r.drawTextW(*m_font, x + 1.f, y + 1.f, glyph, shadowColor, iconSize);
                 r.drawTextW(*m_font, x, y, glyph, txtColor, iconSize);
             }
@@ -671,8 +1411,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
             float y = boxY;
             float actualW = measureTextNarrow(m_font, armorLabel, textSizeInfo);
             placeRect(anchor, approxTextWidth(armorLabel, textSizeInfo), textSizeInfo + 1.f, x, y);
-            if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                x = boxX + boxW * 0.5f - actualW * 0.5f;
+            x = finalizeSideTextX(anchor, actualW, x);
             drawOutlined(x, y, armorLabel, textSizeInfo);
             break;
         }
@@ -705,8 +1444,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
             float y = boxY;
             float actualW = measureTextNarrow(m_font, ammoLabel, textSizeInfo);
             placeRect(anchor, approxTextWidth(ammoLabel, textSizeInfo), textSizeInfo + 1.f, x, y);
-            if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                x = boxX + boxW * 0.5f - actualW * 0.5f;
+            x = finalizeSideTextX(anchor, actualW, x);
             drawOutlined(x, y, ammoLabel, textSizeInfo);
             break;
         }
@@ -716,8 +1454,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
                 float y = boxY;
                 float actualW = measureTextNarrow(m_font, "FLASHED", textSizeInfo);
                 placeRect(anchor, approxTextWidth("FLASHED", textSizeInfo), textSizeInfo + 1.f, x, y);
-                if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                    x = boxX + boxW * 0.5f - actualW * 0.5f;
+                x = finalizeSideTextX(anchor, actualW, x);
                 drawOutlined(x, y, "FLASHED", textSizeInfo);
             }
             if (g_cfg.flagDefusingEnabled && player.isDefusing) {
@@ -725,8 +1462,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
                 float y = boxY;
                 float actualW = measureTextNarrow(m_font, "DEFUSING", textSizeInfo);
                 placeRect(anchor, approxTextWidth("DEFUSING", textSizeInfo), textSizeInfo + 1.f, x, y);
-                if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                    x = boxX + boxW * 0.5f - actualW * 0.5f;
+                x = finalizeSideTextX(anchor, actualW, x);
                 drawOutlined(x, y, "DEFUSING", textSizeInfo);
             }
             if (g_cfg.flagScopedEnabled && player.isScoped) {
@@ -734,8 +1470,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
                 float y = boxY;
                 float actualW = measureTextNarrow(m_font, "SCOPED", textSizeInfo);
                 placeRect(anchor, approxTextWidth("SCOPED", textSizeInfo), textSizeInfo + 1.f, x, y);
-                if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                    x = boxX + boxW * 0.5f - actualW * 0.5f;
+                x = finalizeSideTextX(anchor, actualW, x);
                 drawOutlined(x, y, "SCOPED", textSizeInfo);
             }
             if (g_cfg.flagDefuseKitEnabled && player.teamNum == 3 && player.hasDefuseKit) {
@@ -747,8 +1482,7 @@ void EspRenderer::drawPlayerInfo(Renderer& r,
                 const auto* g = m_font->glyph(kitGlyph[0]);
                 if (g) actualW = g->advanceX * (kitSize / static_cast<float>(m_font->renderPx()));
                 placeRect(anchor, kitSize * 0.85f, kitSize + 1.f, x, y);
-                if (anchor == EspAnchor::Top || anchor == EspAnchor::Bottom)
-                    x = boxX + boxW * 0.5f - actualW * 0.5f;
+                x = finalizeSideTextX(anchor, actualW, x);
                 r.drawTextW(*m_font, x + 1.f, y + 1.f, kitGlyph, shadowColor, kitSize);
                 r.drawTextW(*m_font, x, y, kitGlyph, txtColor, kitSize);
             }
@@ -1143,8 +1877,13 @@ void EspRenderer::drawSkeleton(Renderer& r,
 
 // ─── World-to-screen with viewport edge clamping ──────────────────────────────────────────────────────
 static bool worldToScreenClamped(const ViewMatrix& vm, const Vec3& world,
-                                  float sw, float sh, Vec2& edgePt)
+                                  float sw, float sh, Vec2& edgePt,
+                                  float margin = -1.f)
 {
+    if (margin < 0.f)
+        margin = g_cfg.grenadeOffscreenInset;
+    margin = std::clamp(margin, 0.f, (std::min)(sw, sh) * 0.45f);
+
     Vec2 sc;
     if (vm.worldToScreen(world, sc, sw, sh) &&
         sc.x >= 0.f && sc.x <= sw && sc.y >= 0.f && sc.y <= sh)
@@ -1162,9 +1901,8 @@ static bool worldToScreenClamped(const ViewMatrix& vm, const Vec3& world,
     float len = std::sqrtf(sdx*sdx + sdy*sdy);
     if (len < 0.001f) { edgePt = Vec2(sw * 0.5f, sh * 0.5f); return false; }
     sdx /= len; sdy /= len;
-    constexpr float kMargin = 80.f;
-    float tx = std::fabsf(sdx) > 0.001f ? (sw * 0.5f - kMargin) / std::fabsf(sdx) : 1e9f;
-    float ty = std::fabsf(sdy) > 0.001f ? (sh * 0.5f - kMargin) / std::fabsf(sdy) : 1e9f;
+    float tx = std::fabsf(sdx) > 0.001f ? (sw * 0.5f - margin) / std::fabsf(sdx) : 1e9f;
+    float ty = std::fabsf(sdy) > 0.001f ? (sh * 0.5f - margin) / std::fabsf(sdy) : 1e9f;
     float t  = tx < ty ? tx : ty;
     edgePt = Vec2(sw * 0.5f + sdx * t, sh * 0.5f + sdy * t);
     return false;
@@ -1183,6 +1921,7 @@ static float measureTextW(const FontAtlas& font, const wchar_t* text, float size
             w += 8.f * scale;
         }
     }
+    return w;
 }
 
 static float textCenterY(const FontAtlas& font, float top, float boxH, float fontSize) {
@@ -1322,16 +2061,13 @@ static void drawCenteredIcon(Renderer& rn, const FontAtlas& font, float cx, floa
     rn.drawTextW(font, cursorX, baselineY, str, color, size);
 }
 
-static unsigned int withAlpha(unsigned int color, unsigned int alpha) {
-    return (color & 0x00FFFFFFu) | (alpha << 24);
-}
-
 static const char* spectatorModeLabel(int mode) {
     switch (mode) {
         case 2: return "1ST";
         case 3: return "3RD";
         case 4: return "FREE";
-        default: return "OBS";
+        case 5: return "AUTO";
+        default: return "";
     }
 }
 
@@ -1350,6 +2086,34 @@ static bool projectWorldToScreenRaw(const ViewMatrix& vm, const Vec3& world,
     screen.x = (ndcX * 0.5f + 0.5f) * sw;
     screen.y = (-ndcY * 0.5f + 0.5f) * sh;
     return true;
+}
+
+static float worldClipW(const ViewMatrix& vm, const Vec3& world) {
+    const auto& m = vm.m;
+    return m[3][0]*world.x + m[3][1]*world.y + m[3][2]*world.z + m[3][3];
+}
+
+static Vec3 lerpWorld(const Vec3& a, const Vec3& b, float t) {
+    return Vec3{ a.x + (b.x - a.x) * t,
+                 a.y + (b.y - a.y) * t,
+                 a.z + (b.z - a.z) * t };
+}
+
+static void trimSegmentNearPlane(const ViewMatrix& vm, Vec3& worldA, Vec3& worldB) {
+    constexpr float kNearW = 0.001f;
+    float wA = worldClipW(vm, worldA);
+    float wB = worldClipW(vm, worldB);
+    if (wA > kNearW && wB > kNearW)
+        return;
+    if (wA <= kNearW && wB <= kNearW)
+        return;
+
+    float t = (kNearW - wA) / (wB - wA);
+    t = std::clamp(t, 0.f, 1.f);
+    if (wA <= kNearW)
+        worldA = lerpWorld(worldA, worldB, t);
+    else
+        worldB = lerpWorld(worldA, worldB, t);
 }
 
 static int clipCode(float x, float y, float minX, float minY,
@@ -1437,13 +2201,12 @@ static void drawTrajectoryPath(Renderer& rn, const ViewMatrix& vm,
     if (!points || count < 2)
         return;
 
-    unsigned int lineCol = withAlpha(color, 0xF8);
+    unsigned int lineCol = scaleArgbAlpha(color, g_cfg.grenadeTrajectoryAlpha);
     constexpr float kThickness = 1.05f;
     constexpr float kInset = 1.0f;
     int segmentStep = 1;
-    if (count > 160) segmentStep = 4;
-    else if (count > 96) segmentStep = 3;
-    else if (count > 48) segmentStep = 2;
+    if (count > 384) segmentStep = 3;
+    else if (count > 192) segmentStep = 2;
 
     int startIndex = 0;
     Vec3 trimStart = points[0];
@@ -1489,7 +2252,8 @@ static void drawTrajectoryPath(Renderer& rn, const ViewMatrix& vm,
             return;
     }
 
-    auto drawSegment = [&](const Vec3& worldA, const Vec3& worldB) {
+    auto drawSegment = [&](Vec3 worldA, Vec3 worldB) {
+        trimSegmentNearPlane(vm, worldA, worldB);
         Vec2 p0{};
         Vec2 p1{};
         if (!projectWorldToScreenRaw(vm, worldA, sw, sh, p0) ||
@@ -1545,7 +2309,7 @@ static void drawTimerRing(Renderer& rn, const FontAtlas& font, float cx, float c
                            float outerR = 26.f, float innerR = 24.f)
 {
     bool showTimer = hasFuse && fuseTime > 0.f && !isPreThrow;
-    unsigned int alertCol = 0xFFFF5151;
+    unsigned int alertCol = rgbaToArgb(g_cfg.grenadeDangerColor);
     unsigned int accentCol = inDanger ? alertCol : typeCol;
     float alertPulse = inDanger ? (0.55f + 0.45f * std::sin(timeAlive * 9.0f)) : 0.f;
 
@@ -2014,63 +2778,58 @@ static float estimateBombDamage(const Vec3& localOrigin,
 
 // ─── Grenades ──────────────────────────────────────────────────────────────────────────────────
 
-void EspRenderer::drawGrenades(Renderer& r, const EntityManager::Snapshot& snap) {
-    if (!m_font) return;
+static unsigned int grenadeTypeArgb(GrenadeType type) {
+    int idx = static_cast<int>(type);
+    if (idx < 0 || idx >= 5)
+        idx = 0;
+    return rgbaToArgb(g_cfg.grenadeColors[idx]);
+}
 
-    const auto& vm = snap.viewMatrix;
-    const auto& grenades = snap.grenades;
+void EspRenderer::drawGrenades(Renderer& r, const EntityManager::Snapshot& snap, const ViewMatrix& vm) {
     float sw = static_cast<float>(r.screenWidth());
     float sh = static_cast<float>(r.screenHeight());
 
-    Vec3 localPos{};
-    {
-        for (const auto& p : snap.players)
-            if (p.isLocalPlayer && p.isAlive) { localPos = p.origin; break; }
-    }
-
-    struct GrenadeStyle { unsigned int argb; const char* label; };
-    static const GrenadeStyle kStyles[] = {
-        { 0xFFFF3C3C, "HE"      },
-        { 0xFFAAAAAA, "Smoke"   },
-        { 0xFFFFFFC8, "Flash"   },
-        { 0xFFFF8C00, "Molotov" },
-        { 0xFFC8C800, "Decoy"   },
-    };
-
-    constexpr float kLabelSize = 20.5f;
-    constexpr float kWorldIconSize = 28.f;
-    constexpr float kWorldIconOffsetX = 14.f;
-    constexpr float kWorldIconOffsetY = -14.f;
-    constexpr float kLabelOffsetY = 10.0f;
-
-    auto labelWidth = [&](const char* label) {
-        if (std::strcmp(label, "HE") == 0) return measureTextW(*m_font, L"HE", kLabelSize);
-        if (std::strcmp(label, "Flash") == 0) return measureTextW(*m_font, L"Flash", kLabelSize);
-        if (std::strcmp(label, "Molotov") == 0) return measureTextW(*m_font, L"Molotov", kLabelSize);
-        if (std::strcmp(label, "Decoy") == 0) return measureTextW(*m_font, L"Decoy", kLabelSize);
-        return measureTextW(*m_font, L"Smoke", kLabelSize);
-    };
-
-    auto drawBolderLabel = [&](float x, float y, const char* label, unsigned int col) {
-        r.drawText(*m_font, x, y, label, withAlpha(col, 0xBC), kLabelSize);
-        r.drawText(*m_font, x + 0.9f, y, label, col, kLabelSize);
-    };
+    const unsigned int preThrowCol = rgbaToArgb(g_cfg.grenadePreThrowColor);
 
     if (g_cfg.grenadeTrajectory) {
         const auto& preThrow = snap.preThrow;
         if (preThrow.isActive && preThrow.predCount > 1) {
-            unsigned int kPreThrowCol = 0xDC50FF78;
-            drawTrajectoryPath(r, vm, preThrow.predPoints, preThrow.predCount, sw, sh, kPreThrowCol, &preThrow.predPoints[0]);
-            Vec2 preLandPt;
-            if (worldToScreenClamped(vm, preThrow.predPoints[preThrow.predCount - 1], sw, sh, preLandPt))
-                drawTimerRing(r, *m_font, preLandPt.x, preLandPt.y,
-                              preThrow.fuseTime > 0.f, preThrow.fuseTime, 0.f,
-                              kPreThrowCol, false, true, preThrow.type);
+            drawTrajectoryPath(r, vm, preThrow.predPoints, preThrow.predCount, sw, sh, preThrowCol, &preThrow.predPoints[0]);
+            if (m_font) {
+                Vec2 preLandPt;
+                if (worldToScreenClamped(vm, preThrow.predPoints[preThrow.predCount - 1], sw, sh, preLandPt))
+                    drawTimerRing(r, *m_font, preLandPt.x, preLandPt.y,
+                                  preThrow.fuseTime > 0.f, preThrow.fuseTime, 0.f,
+                                  preThrowCol, false, true, preThrow.type);
+            }
+        }
+
+        for (const auto& g : snap.grenades) {
+            if (!g.isValid || g.isDeployed || g.predCount < 2)
+                continue;
+            drawTrajectoryPath(r, vm, g.predPoints, g.predCount, sw, sh, grenadeTypeArgb(g.type), &g.origin);
         }
     }
 
+    if (!m_font)
+        return;
+
     if (!g_cfg.grenadeEnabled)
         return;
+
+    const auto& grenades = snap.grenades;
+
+    Vec3 localPos{};
+    for (const auto& p : snap.players) {
+        if (p.isLocalPlayer && p.isAlive) {
+            localPos = p.origin;
+            break;
+        }
+    }
+
+    constexpr float kWorldIconSize = 28.f;
+    constexpr float kWorldIconOffsetX = 14.f;
+    constexpr float kWorldIconOffsetY = -14.f;
 
     for (const auto& g : grenades) {
         if (!g.isValid) continue;
@@ -2079,8 +2838,7 @@ void EspRenderer::drawGrenades(Renderer& r, const EntityManager::Snapshot& snap)
         bool onScreenNow = vm.worldToScreen(g.origin, screen, sw, sh);
 
         if (g.isDeployed) {
-            int idx = static_cast<int>(g.type);
-            const GrenadeStyle& st = kStyles[idx];
+            const unsigned int typeCol = grenadeTypeArgb(g.type);
 
             constexpr float kBurnTotal = 7.f;
             constexpr float kSmokeTotal = 18.f;
@@ -2094,29 +2852,19 @@ void EspRenderer::drawGrenades(Renderer& r, const EntityManager::Snapshot& snap)
 
             if (deployOnScreen) {
                 drawTimerRing(r, *m_font, deployPt.x, deployPt.y, true, burnTotal, elapsed,
-                              st.argb, false, false, g.type);
+                              typeCol, false, false, g.type);
             } else {
                 drawTimerRing(r, *m_font, deployPt.x, deployPt.y, true, burnTotal, elapsed,
-                              st.argb, false, false, g.type, 40.f, 38.f);
+                              typeCol, false, false, g.type, 40.f, 38.f);
             }
             continue;
         }
 
-        if (!onScreenNow) continue;
-
-        int idx = static_cast<int>(g.type);
-        const GrenadeStyle& st = kStyles[idx];
-
-        float iconCx = screen.x + kWorldIconOffsetX;
-        float iconCy = screen.y + kWorldIconOffsetY;
-        drawGrenadeIcon(r, *m_font, iconCx, iconCy, kWorldIconSize, g.type, st.argb);
-
         if (g_cfg.grenadeTrajectory && g.predCount > 1) {
-            drawTrajectoryPath(r, vm, g.predPoints, g.predCount, sw, sh, st.argb, &g.origin);
-
             const Vec3& landWorld = g.predPoints[g.predCount - 1];
             Vec2 edgePt;
             bool lpOnScreen = worldToScreenClamped(vm, landWorld, sw, sh, edgePt);
+            const unsigned int typeCol = grenadeTypeArgb(g.type);
             if (lpOnScreen) {
                 bool inDanger = false;
                 if (g.hasFuse && g.damageRadius > 0.f) {
@@ -2126,7 +2874,7 @@ void EspRenderer::drawGrenades(Renderer& r, const EntityManager::Snapshot& snap)
                     inDanger = (d.x*d.x + d.y*d.y + d.z*d.z) < g.damageRadius * g.damageRadius;
                 }
                 drawTimerRing(r, *m_font, edgePt.x, edgePt.y, g.hasFuse, g.fuseTime, g.timeAlive,
-                              st.argb, inDanger, false, g.type);
+                              typeCol, inDanger, false, g.type);
             } else if (g.hasFuse) {
                 bool inDanger = false;
                 if (g.damageRadius > 0.f) {
@@ -2136,9 +2884,15 @@ void EspRenderer::drawGrenades(Renderer& r, const EntityManager::Snapshot& snap)
                     inDanger = (d.x*d.x + d.y*d.y + d.z*d.z) < g.damageRadius * g.damageRadius;
                 }
                 drawTimerRing(r, *m_font, edgePt.x, edgePt.y, g.hasFuse, g.fuseTime, g.timeAlive,
-                              st.argb, inDanger, false, g.type, 40.f, 38.f);
+                              typeCol, inDanger, false, g.type, 40.f, 38.f);
             }
         }
+
+        if (!onScreenNow) continue;
+
+        float iconCx = screen.x + kWorldIconOffsetX;
+        float iconCy = screen.y + kWorldIconOffsetY;
+        drawGrenadeIcon(r, *m_font, iconCx, iconCy, kWorldIconSize, g.type, grenadeTypeArgb(g.type));
     }
 }
 
@@ -2193,11 +2947,11 @@ void EspRenderer::drawSpectators(Renderer& r, const EntityManager::Snapshot& sna
     float sh = static_cast<float>(r.screenHeight());
     float scale = std::clamp(sh / 1080.f, 1.0f, 1.22f);
     float x = 34.f * scale;
-    float y = 122.f * scale;
-    float pad = 18.f * scale;
-    float rowH = 36.f * scale;
-    float panelW = (std::min)(296.f * scale, sw - 24.f * scale);
-    float panelH = 56.f * scale + (spectatorCount > 0 ? spectatorCount * rowH : 30.f * scale);
+    float y = 88.f * scale;
+    float pad = 14.f * scale;
+    float rowH = 34.f * scale;
+    float panelW = (std::min)(280.f * scale, sw - 24.f * scale);
+    float panelH = 44.f * scale + (spectatorCount > 0 ? spectatorCount * rowH : 26.f * scale);
 
     float availX = (std::max)(0.f, sw - panelW);
     float availY = (std::max)(0.f, sh - panelH);
@@ -2230,41 +2984,40 @@ void EspRenderer::drawSpectators(Renderer& r, const EntityManager::Snapshot& sna
         }
     }
 
-    r.drawRoundedFilledRect(x, y, panelW, panelH, Theme::BG, 14.f * scale);
-    r.drawRoundedRect(x, y, panelW, panelH, Theme::BORDER, 14.f * scale, 1.0f);
+    r.drawRoundedFilledRect(x, y, panelW, panelH, Theme::BG, 12.f * scale);
+    r.drawRoundedRect(x, y, panelW, panelH, Theme::BORDER, 12.f * scale, 1.0f);
 
-    float titlePillW = 116.f * scale;
-    float titlePillH = 28.f * scale;
-    r.drawRoundedFilledRect(x + pad, y + pad, titlePillW, titlePillH, 0xFF11131C, 8.f * scale);
     r.drawText(*m_font,
-               x + pad + 11.f * scale,
-               textCenterY(*m_font, y + pad, titlePillH, 14.f * scale),
+               x + pad,
+               textCenterY(*m_font, y + pad, 20.f * scale, 14.f * scale),
                "Spectators",
                Theme::TEXT,
                14.f * scale);
 
     wchar_t countBuf[8];
     swprintf(countBuf, 8, L"%d", spectatorCount);
-    float countPillW = spectatorCount >= 10 ? 34.f * scale : 30.f * scale;
-    float countPillH = 24.f * scale;
+    float countPillW = spectatorCount >= 10 ? 30.f * scale : 26.f * scale;
+    float countPillH = 20.f * scale;
     float countPillX = x + panelW - pad - countPillW;
-    float countPillY = y + pad + 2.f * scale;
-    r.drawRoundedFilledRect(countPillX, countPillY, countPillW, countPillH, 0xFF171927, 7.f * scale);
+    float countPillY = y + pad;
+    r.drawRoundedFilledRect(countPillX, countPillY, countPillW, countPillH, 0xFF171927, 6.f * scale);
+    const float countTextSize = 12.f * scale;
+    const float countTextW = measureTextW(*m_font, countBuf, countTextSize);
     r.drawTextW(*m_font,
-                countPillX + 10.f * scale,
-                textCenterY(*m_font, countPillY, countPillH, 13.f * scale),
+                countPillX + (countPillW - countTextW) * 0.5f,
+                textCenterY(*m_font, countPillY, countPillH, countTextSize),
                 countBuf,
                 Theme::TEXT_LINK,
-                13.f * scale);
+                countTextSize);
 
-    float rowY = y + 52.f * scale;
+    float rowY = y + 40.f * scale;
     if (spectatorCount <= 0) {
         r.drawText(*m_font,
                    x + pad,
-                   textCenterY(*m_font, rowY, 18.f * scale, 12.5f * scale),
+                   textCenterY(*m_font, rowY, 16.f * scale, 12.f * scale),
                    "No one spectating you",
                    Theme::TEXT_MUTED,
-                   12.5f * scale);
+                   12.f * scale);
         return;
     }
 
@@ -2272,51 +3025,72 @@ void EspRenderer::drawSpectators(Renderer& r, const EntityManager::Snapshot& sna
         if (!spectator.isValid)
             continue;
 
-        r.drawRoundedFilledRect(x + pad, rowY, panelW - pad * 2.f, 30.f * scale, 0xFF11131C, 8.f * scale);
+        if (rowY > y + 36.f * scale) {
+            r.drawLine(x + pad, rowY - 4.f * scale, x + panelW - pad, rowY - 4.f * scale,
+                       0x22FFFFFFu, 1.f);
+        }
+
+        const float avatarSize = 24.f * scale;
+        float textX = x + pad;
+        ID3D11ShaderResourceView* avatarSrv = nullptr;
+        if (spectator.isBot)
+            avatarSrv = SteamAvatars::instance().getBot(spectator.teamNum);
+        else if (spectator.steamId != 0)
+            avatarSrv = SteamAvatars::instance().resolve(false, 0, spectator.steamId);
+        if (avatarSrv) {
+            const float avX = x + pad;
+            const float avY = rowY + (rowH - avatarSize) * 0.5f - 2.f * scale;
+            drawSteamAvatar(r, avatarSrv, avX, avY, avatarSize);
+            textX = avX + avatarSize + 8.f * scale;
+        }
 
         std::string label = spectator.name;
         if (label.size() > 22)
             label = label.substr(0, 21) + "...";
 
         r.drawText(*m_font,
-                   x + pad + 10.f * scale,
-                   textCenterY(*m_font, rowY + 2.f * scale, 12.f * scale, 13.5f * scale),
+                   textX,
+                   rowY + 1.f * scale,
                    label.c_str(),
                    Theme::TEXT,
-                   13.5f * scale);
+                   13.f * scale);
 
         std::string targetLine;
         if (spectator.watchingLocal || spectator.targetName == "You") {
             targetLine = "Watching you";
         } else if (spectator.targetName == "Free roam") {
             targetLine = "Free roam";
+        } else if (spectator.targetName == "Death cam") {
+            targetLine = "Death cam";
         } else if (!spectator.targetName.empty() && spectator.targetName != "Unknown") {
             targetLine = "Watching " + spectator.targetName;
         } else {
-            targetLine = "Dead / No target";
+            targetLine = "Spectating";
         }
-        if (targetLine.size() > 24)
-            targetLine = targetLine.substr(0, 23) + "...";
+        if (targetLine.size() > 26)
+            targetLine = targetLine.substr(0, 25) + "...";
 
         r.drawText(*m_font,
-                   x + pad + 10.f * scale,
-                   textCenterY(*m_font, rowY + 16.f * scale, 10.f * scale, 11.5f * scale),
+                   textX,
+                   rowY + 15.f * scale,
                    targetLine.c_str(),
                    spectator.watchingLocal ? Theme::TEXT_LINK : Theme::TEXT_MUTED,
-                   11.5f * scale);
+                   11.f * scale);
 
         const char* modeLabel = spectatorModeLabel(spectator.mode);
-        float modePillW = spectator.mode == 4 ? 46.f * scale : 38.f * scale;
-        float modePillH = 18.f * scale;
-        float modePillX = x + panelW - pad - modePillW - 8.f * scale;
-        float modePillY = rowY + 6.f * scale;
-        r.drawRoundedFilledRect(modePillX, modePillY, modePillW, modePillH, 0xFF1B1D2A, 6.f * scale);
-        r.drawText(*m_font,
-                   modePillX + 8.f * scale,
-                   textCenterY(*m_font, modePillY, modePillH, 11.5f * scale),
-                   modeLabel,
-                   Theme::TEXT_MUTED,
-                   11.5f * scale);
+        if (modeLabel && modeLabel[0]) {
+            float modePillW = spectator.mode == 4 ? 42.f * scale : 34.f * scale;
+            float modePillH = 16.f * scale;
+            float modePillX = x + panelW - pad - modePillW;
+            float modePillY = rowY + (rowH - modePillH) * 0.5f - 2.f * scale;
+            r.drawRoundedFilledRect(modePillX, modePillY, modePillW, modePillH, 0xFF1B1D2A, 5.f * scale);
+            r.drawText(*m_font,
+                       modePillX + 7.f * scale,
+                       textCenterY(*m_font, modePillY, modePillH, 10.5f * scale),
+                       modeLabel,
+                       Theme::TEXT_MUTED,
+                       10.5f * scale);
+        }
 
         rowY += rowH;
     }

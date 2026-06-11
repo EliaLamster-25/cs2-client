@@ -1,0 +1,23 @@
+{
+  "name": "crymore-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute crymore --local --file=./schema.sql",
+    "db:remote": "wrangler d1 execute crymore --remote --file=./schema.sql",
+    "typecheck": "tsc --noEmit",
+    "pack:loader": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/pack_loader.ps1",
+    "publish:loader": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/publish_loader.ps1 -Build"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250204.0",
+    "typescript": "^5.7.3",
+    "wrangler": "^3.114.1"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "hono": "^4.7.4"
+  }
+}

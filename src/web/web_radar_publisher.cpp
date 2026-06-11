@@ -323,13 +323,11 @@ void WebRadarPublisher::update(const Process& proc, const EntityManager& em) {
         { "roundLive", intel.roundLive },
         { "replayIndex", intel.replayEventIndex },
         { "replayMax", intel.replayEventMax },
-        { "lineupCount", intel.lineupCount },
         { "cues", std::move(cues) },
         { "threats", std::move(threats) },
         { "replay", std::move(replay) },
         { "deathHeat", heatToJson(intel.deathHeat) },
-        { "failedEntryHeat", heatToJson(intel.failedEntryHeat) },
-        { "utilityWasteHeat", heatToJson(intel.utilityWasteHeat) }
+        { "failedEntryHeat", heatToJson(intel.failedEntryHeat) }
     };
 
     enqueueSnapshot(payload.dump());
