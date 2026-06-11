@@ -1,0 +1,30 @@
+name = "crymore"
+main = "src/index.ts"
+compatibility_date = "2025-02-04"
+
+# Site + API on one worker (Pages can point here too).
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "crymore"
+database_id = "6c911eb9-c432-488d-a75e-a7fd35a65f16"
+
+[[r2_buckets]]
+binding = "LOADER_BUCKET"
+bucket_name = "crymore-loaders"
+
+# Optional: rate-limit / download tokens
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "REPLACE_WITH_KV_ID"
+
+[vars]
+SITE_URL = "https://crymore.crymore-pw.workers.dev"
+R2_BUCKET_NAME = "crymore-loaders"
+# R2_ACCOUNT_ID = "9e4a6d166b2cdb11614830f53f6e50cc"
+# Presigned downloads (fast — direct from R2, not through Worker):
+# wrangler secret put R2_ACCESS_KEY_ID
+# wrangler secret put R2_SECRET_ACCESS_KEY

@@ -3,10 +3,16 @@
 #include <thread>
 #include <atomic>
 #include <string>
+#include <cstring>
 
 #include "config.h"
 #include "str_obf.h"
+#include "launch_handshake.h"
+#include "profile/user_profile.h"
 #include "memory/process.h"
+#include "memory/kernel_memory.h"
+#include "memory/driver_manager.h"
+#include "input/input_router.h"
 #include "overlay/window.h"
 #include "overlay/renderer.h"
 #include "game/entity_manager.h"
@@ -15,7 +21,13 @@
 #include "esp/esp_renderer.h"
 #include "menu/menu.h"
 #include "analytics/match_intel.h"
+#include "game/aim_style.h"
+#include "debug/aim_debug.h"
 #include "web/web_radar_publisher.h"
+#include "cloud/cloud_api.h"
+#include "steam/steam_avatars.h"
+#include "overlay/overlay_metrics.h"
+#include "debug/overlay_log.h"
 
 // XOR-obfuscated critical strings at runtime — prevent static signatures.
 static const std::wstring kCs2Exe = OBFW("\xC8\xD8\x99\x85\xCE\xD3\xCE", 0xAB);
@@ -23,17 +35,76 @@ static const std::wstring kCs2Window = OBFW("\xE8\xC4\xDE\xC5\xDF\xCE\xD9\x86\xF
 static const std::wstring kClientDll = OBFW("\xC8\xC7\xC2\xCE\xC5\xDF\x85\xCF\xC7\xC7", 0xAB);
 static const std::wstring kEngine2Dll = OBFW("\xCE\xC5\xCC\xC2\xC5\xCE\x99\x85\xCF\xC7\xC7", 0xAB);
 
-// Build ID — changes every rebuild, ensuring a different binary hash.
+// Build ID — debug builds only (avoid stable release signatures).
+#ifdef OVERLAY_DEBUG_LOG
 static const char kBuildId[] = __DATE__ " " __TIME__;
+#endif
 
 static void tapKey(WORD vk) {
-    INPUT inputs[2]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = vk;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = vk;
-    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(2, inputs, sizeof(INPUT));
+    input_router::tapKey(vk);
+}
+
+#ifdef OVERLAY_DEBUG_LOG
+static void initStartupConsole() {
+    if (!AllocConsole())
+        return;
+
+    SetConsoleTitleW(L"overlay debug");
+
+    FILE* out = nullptr;
+    FILE* err = nullptr;
+    FILE* in = nullptr;
+    freopen_s(&out, "CONOUT$", "w", stdout);
+    freopen_s(&err, "CONOUT$", "w", stderr);
+    freopen_s(&in, "CONIN$", "r", stdin);
+    (void)out;
+    (void)err;
+    (void)in;
+
+    std::ios::sync_with_stdio(true);
+    std::cout.clear();
+    std::clog.clear();
+    std::cerr.clear();
+    std::cin.clear();
+
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD mode = 0;
+        if (GetConsoleMode(hOut, &mode))
+            SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+
+    LOG_INFO("=== startup ===\nBuild: %s\n\n", kBuildId);
+}
+#else
+static void initStartupConsole() {}
+#endif
+
+[[noreturn]] static void fatalExit(int code, const char* message) {
+    static char detailBuf[768];
+    detailBuf[0] = '\0';
+    if (message && message[0]) {
+        std::snprintf(detailBuf, sizeof(detailBuf), "%s", message);
+        const std::string& extra = DriverManager::lastSetupDetail();
+        if (!extra.empty()) {
+            std::strncat(detailBuf, "\n\n", sizeof(detailBuf) - std::strlen(detailBuf) - 1);
+            std::strncat(detailBuf, extra.c_str(), sizeof(detailBuf) - std::strlen(detailBuf) - 1);
+        }
+        const char* logHint = "\n\nSee %LOCALAPPDATA%\\crymore\\overlay.log";
+        std::strncat(detailBuf, logHint, sizeof(detailBuf) - std::strlen(detailBuf) - 1);
+    }
+#ifdef OVERLAY_DEBUG_LOG
+    if (detailBuf[0])
+        LOG_ERROR("%s\n", detailBuf);
+    LOG_ERROR("\nPress Enter to exit...\n");
+    std::cin.clear();
+    std::cin.ignore(100000, '\n');
+    std::cin.get();
+#else
+    if (detailBuf[0])
+        MessageBoxA(nullptr, detailBuf, "Error", MB_ICONERROR | MB_OK);
+#endif
+    ExitProcess(static_cast<UINT>(code));
 }
 
 /// @file main.cpp
@@ -63,40 +134,105 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     // ── 0. Fix DPI Scaling (Removes pixelation/blurriness) ───────────────
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    // ── Console: only in debug builds ─────────────────────────────────────
-#ifdef _DEBUG
-    AllocConsole();
-    FILE* fDummy;
-    freopen_s(&fDummy, "CONOUT$", "w", stdout);
-    freopen_s(&fDummy, "CONOUT$", "w", stderr);
-    std::cout.clear();
-    std::clog.clear();
-    std::cerr.clear();
+    {
+        LaunchHandshake hs{};
+        std::string gateErr;
+        if (!launchVerifyFromStdin(hs, gateErr)) {
+#ifdef CRYMORE_REQUIRE_LAUNCH_GATE
+            ExitProcess(1);
+#else
+            fatalExit(1, gateErr.c_str());
 #endif
+        }
+        userProfileApplyFromHandshake(hs);
+    }
 
-    // ── 1. Attach to cs2.exe ───────────────────────────────────────────────────
+    cloud_api::initFromEnvironment();
+
+    initStartupConsole();
+
+    if (!input_router::initialize())
+        LOG_ERROR("[Main] Input inject unavailable.\n");
+
+    // ── 1. Kernel memory (default) ─────────────────────────────────────────────
+    const bool wantKernel = (g_cfg.memoryBackend == 1);
+    if (wantKernel) {
+        LOG_INFO("[Main] Initializing kernel backend...\n");
+        DriverManager::printStatus(DriverManager::checkSystem());
+        const auto setup = KernelMemory::instance().initialize();
+        if (setup == DriverManager::SetupResult::Ready) {
+            if (!KernelMemory::instance().openDevice()) {
+                LOG_ERROR("[Main] Failed to open kernel device.\n");
+                if (!g_cfg.memoryAllowWin32Fallback)
+                    fatalExit(1, "Kernel device open failed.");
+                g_cfg.memoryBackend = 0;
+            } else {
+                LOG_INFO("[Main] Kernel backend ready.\n");
+            }
+        } else {
+            if (setup == DriverManager::SetupResult::NeedReboot)
+                LOG_ERROR("[Main] Reboot required before kernel driver can load.\n");
+            else if (setup == DriverManager::SetupResult::NeedAdmin)
+                LOG_ERROR("[Main] Run as Administrator for kernel mode.\n");
+            else if (setup == DriverManager::SetupResult::DriverFileMissing)
+                LOG_ERROR("[Main] Kernel driver image not found.\n");
+            else if (setup == DriverManager::SetupResult::MapperMissing)
+                LOG_ERROR("[Main] Driver mapper not found.\n");
+            else if (setup == DriverManager::SetupResult::SetupFailed)
+                LOG_ERROR("[Main] Kernel setup failed.\n");
+
+            if (!g_cfg.memoryAllowWin32Fallback) {
+                const char* msg = "Kernel init failed.";
+                switch (setup) {
+                case DriverManager::SetupResult::NeedReboot:
+                    msg = "Reboot required - disable HVCI / driver blocklist first.";
+                    break;
+                case DriverManager::SetupResult::NeedAdmin:
+                    msg = "Run as Administrator (loader and overlay need elevation).";
+                    break;
+                case DriverManager::SetupResult::DriverFileMissing:
+                    msg = "Kernel driver (.sys) missing beside overlay - republish overlay pack.";
+                    break;
+                case DriverManager::SetupResult::MapperMissing:
+                    msg = "Driver mapper missing beside overlay - republish overlay pack.";
+                    break;
+                case DriverManager::SetupResult::SetupFailed:
+                    msg = "Kernel driver mapping failed.";
+                    break;
+                default:
+                    break;
+                }
+                fatalExit(1, msg);
+            }
+            LOG_ERROR("[Main] Falling back to Win32 RPM.\n");
+            g_cfg.memoryBackend = 0;
+        }
+    }
+
+    // ── 2. Attach to cs2.exe ───────────────────────────────────────────────────
     Process proc;
-    std::cout << "[Main] Waiting for cs2.exe...\n";
-    while (!proc.attach(kCs2Exe)) {
+    LOG_INFO("[Main] Waiting for game process...\n");
+    const bool preferKernel = (g_cfg.memoryBackend == 1);
+    int attachAttempts = 0;
+    while (!proc.attach(kCs2Exe, preferKernel)) {
+        if (++attachAttempts % 5 == 0)
+            LOG_INFO("[Main] Still waiting...\n");
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
-    // ── 2. Initialise entity manager (resolves client.dll) ─────────────────────
+    if (proc.usesKernelMemory() && g_cfg.visibilityBackend != 0)
+        g_cfg.visibilityBackend = 0;
+
+    // ── 3. Initialise entity manager (resolves client.dll) ─────────────────────
     EntityManager entityMgr;
     if (!entityMgr.init(proc)) {
-        std::cerr << "[Main] EntityManager init failed.\n";
-        return 1;
+        fatalExit(1, "Init failed.");
     }
-
-    // Close the initial attach handle; entity thread will open per-cycle.
-    proc.closeHandle();
 
     // ── 3. Find the game window ────────────────────────────────────────────────
     HWND gameWindow = FindWindowW(nullptr, kCs2Window.c_str());
     if (!gameWindow) {
-        std::cerr << "[Main] Could not find game window '"
-                  << "Counter-Strike 2" << "'\n";
-        return 1;
+        fatalExit(1, "Game window not found.");
     }
 
     RECT gameRect;
@@ -107,26 +243,28 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     // ── 4. Create overlay window ───────────────────────────────────────────────
     OverlayWindow overlay;
     if (!overlay.create(hInstance, screenW, screenH)) {
-        return 1;
+        fatalExit(1, "Overlay window failed.");
     }
 
     // ── 5. Initialise D3D11 renderer ───────────────────────────────────────────
     Renderer renderer;
     if (!renderer.init(overlay.hwnd(), screenW, screenH)) {
-        return 1;
+        fatalExit(1, "Renderer init failed.");
     }
 
     // ── 6. ESP renderer and Menu ───────────────────────────────────────────────
     EspRenderer esp;
     Menu menu;
     menu.init(renderer);
+    SteamAvatars::instance().init(renderer.device());
     esp.setFont(menu.font());
+    esp.setBrandLogo(menu.brandLogoSrv(), menu.brandLogoW(), menu.brandLogoH());
     Triggerbot triggerbot;
     AimAssist aimAssist;
     WebRadarPublisher webRadar;
 
     // ── 7. Main loop ───────────────────────────────────────────────────────────
-    std::cout << "[Main] Entering render loop. Press INSERT to toggle menu, END to exit.\n";
+    LOG_INFO("[Main] Render loop started.\n");
 
     // Background thread: entity reads at ~120 Hz, decoupled from render rate.
     std::atomic<bool> running{ true };
@@ -172,43 +310,46 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
                 }
             }
 
-            int latencyMode = g_cfg.latencyMode;
-            if (latencyMode < 0) latencyMode = 0;
-            if (latencyMode > 2) latencyMode = 2;
-            auto kUpdateInterval = (latencyMode == 1)
-                ? std::chrono::milliseconds(3)
-                : std::chrono::milliseconds(6);
+            std::chrono::steady_clock::duration kUpdateInterval = std::chrono::steady_clock::duration::zero();
 
             if (!isForeground && bgMode > 0) {
-                if (bgMode == 1)
-                    kUpdateInterval = (std::max)(kUpdateInterval, std::chrono::milliseconds(33));
-                else
-                    kUpdateInterval = (std::max)(kUpdateInterval, std::chrono::milliseconds(100));
+                const std::chrono::steady_clock::duration bgMin = (bgMode == 1)
+                    ? std::chrono::milliseconds(33)
+                    : std::chrono::milliseconds(100);
+                if (kUpdateInterval < bgMin)
+                    kUpdateInterval = bgMin;
             }
 
-            // Open process handle for this update cycle, close when done.
-            if (!proc.openHandle()) {
+            const bool needTraceAccess = !proc.usesKernelMemory()
+                && g_cfg.visibilityBackend != 0
+                && (g_cfg.visibilityCheckEnabled
+                    || (g_cfg.aimAssistEnabled && g_cfg.aimRequireVisibility));
+            if (needTraceAccess) {
+                if (!proc.openExtendedHandle()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
+                }
+            } else if (!proc.ensureHandle()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
             auto t0 = std::chrono::steady_clock::now();
             entityMgr.update(proc);
-            MatchIntel::instance().update(entityMgr.snapshot());
+            const auto entitySnap = entityMgr.snapshot();
+            MatchIntel::instance().update(entitySnap);
+            if (AimCalibration::instance().isActive())
+                AimCalibration::instance().update(proc, entityMgr, 5.f);
             triggerbot.update(proc, entityMgr);
-            if (g_cfg.aimAssistEnabled)
-                aimAssist.update(proc, entityMgr);
             webRadar.update(proc, entityMgr);
-            proc.closeHandle();
             auto elapsed = std::chrono::steady_clock::now() - t0;
             auto us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
             perf.totalUs += us;
             if (us > perf.maxUs) perf.maxUs = us;
             if (us > std::chrono::duration_cast<std::chrono::microseconds>(kUpdateInterval).count())
                 ++perf.overruns;
-            if (++perf.count == 600) {
-                std::printf("[EntityThread] avg=%lldus max=%lldus overrun=%d/600 budget=%lldus\n",
-                    perf.totalUs / 300, perf.maxUs, perf.overruns,
-                    (long long)std::chrono::duration_cast<std::chrono::microseconds>(kUpdateInterval).count());
+            if (++perf.count == 6000) {
+                LOG_INFO("[EntityThread] avg=%lldus max=%lldus overrun=%d/6000\n",
+                    perf.totalUs / 6000, perf.maxUs, perf.overruns);
                 perf = {};
             }
             if (elapsed < kUpdateInterval)
@@ -218,9 +359,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     while (running.load(std::memory_order_relaxed)) {
         if (!overlay.processMessages()) break;
+        if (g_requestShutdown.load(std::memory_order_relaxed)) break;
         if (GetAsyncKeyState(VK_END) & 0x8000) break;
         if (!proc.isAttached()) {
-            std::cout << "[Main] Process detached.  Exiting.\n";
+            LOG_INFO("[Main] Process detached.\n");
             break;
         }
 
@@ -237,14 +379,27 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         insertDown = insertPressed;
 
         renderer.beginFrame();
-        esp.render(renderer, entityMgr);
-        menu.render(renderer, entityMgr, overlay.hwnd());
+        SteamAvatars::instance().tick();
+        aimDebugSyncConsole(g_cfg.aimDebugConsole);
+        if (g_cfg.aimAssistEnabled)
+            aimAssist.update(proc, entityMgr,
+                static_cast<float>(renderer.screenWidth()),
+                static_cast<float>(renderer.screenHeight()));
+        esp.render(renderer, entityMgr, proc);
+        menu.render(renderer, entityMgr, proc, overlay.hwnd());
         renderer.endFrame();
+        overlay_metrics::onOverlayFrameEnd();
     }
 
     running.store(false, std::memory_order_relaxed);
     entityThread.join();
+    SteamAvatars::instance().shutdown();
     proc.detach();
-    std::cout << "[Main] Exited cleanly.\n";
+#ifdef OVERLAY_DEBUG_LOG
+    LOG_INFO("[Main] Exited.\nPress Enter to close...\n");
+    std::cin.clear();
+    std::cin.ignore(100000, '\n');
+    std::cin.get();
+#endif
     return 0;
 }

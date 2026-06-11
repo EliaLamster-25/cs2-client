@@ -1,4 +1,11 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "bsp/bsp_world.h"
+#include "debug/overlay_log.h"
+
+#include <ShlObj.h>
 
 #include <fstream>
 #include <cstring>
@@ -8,6 +15,8 @@
 #include <iostream>
 #include <limits>
 #include <vector>
+#include <filesystem>
+#include <Windows.h>
 
 // LZ4 decompression (single-file implementation pulled in here)
 extern "C" {
@@ -273,6 +282,7 @@ bool BspWorld::load(const std::string& mapName, const std::string& cs2Path) {
         // vmdl_c PHYS blobs.  Return false so the caller falls through to
         // loadFromVpk() which extracts the actual collision hulls and mesh tris.
         std::cout << "[BspWorld] No solid brushes in VBSP — delegating to VPK physics loader\n";
+        clear();
         return false;
     }
 
@@ -300,10 +310,10 @@ void BspWorld::buildTriGrid() {
     m_triGrid.clear();
     for (uint32_t ti = 0; ti < static_cast<uint32_t>(m_tris.size()); ++ti) {
         const MeshTri& tri = m_tris[ti];
-        const float mnX = std::min({ tri.p[0].x, tri.p[1].x, tri.p[2].x });
-        const float mxX = std::max({ tri.p[0].x, tri.p[1].x, tri.p[2].x });
-        const float mnY = std::min({ tri.p[0].y, tri.p[1].y, tri.p[2].y });
-        const float mxY = std::max({ tri.p[0].y, tri.p[1].y, tri.p[2].y });
+        const float mnX = tri.mnX;
+        const float mxX = tri.mxX;
+        const float mnY = tri.mnY;
+        const float mxY = tri.mxY;
         const int cx0 = static_cast<int>(std::floorf(mnX / kTriGridCell));
         const int cx1 = static_cast<int>(std::floorf(mxX / kTriGridCell));
         const int cy0 = static_cast<int>(std::floorf(mnY / kTriGridCell));
@@ -381,6 +391,7 @@ bool BspWorld::loadTri(const std::string& triPath) {
         tri.p[1] = {v[3], v[4], v[5]};
         tri.p[2] = {v[6], v[7], v[8]};
         tri.n    = {nx/len, ny/len, nz/len};
+        tri.computeBounds();
         m_tris.push_back(tri);
     }
 
@@ -393,7 +404,41 @@ bool BspWorld::loadTri(const std::string& triPath) {
     // No brush grid needed — .tri files contain only triangle data.
     m_mapName = triPath;
     m_loaded  = true;
+
+    char summary[160];
+    std::snprintf(summary, sizeof(summary),
+        "[BSP] TRI cache: %zu triangles (%s)", m_tris.size(), triPath.c_str());
+    overlayFileLog(summary);
     return true;
+}
+
+static std::filesystem::path mapCacheDirPath() {
+    wchar_t localApp[MAX_PATH]{};
+    if (!SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp)))
+        return {};
+
+    const std::filesystem::path dir =
+        std::filesystem::path(localApp) / L"crymore" / L"mapcache";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+static std::string mapCacheDir() {
+    const std::filesystem::path dir = mapCacheDirPath();
+    if (dir.empty())
+        return {};
+
+    const std::wstring wdir = dir.wstring();
+    int need = WideCharToMultiByte(CP_UTF8, 0, wdir.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (need <= 0) return {};
+    std::string narrow(static_cast<std::size_t>(need), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wdir.c_str(), -1, narrow.data(), need, nullptr, nullptr);
+    if (!narrow.empty() && narrow.back() == '\0')
+        narrow.pop_back();
+    if (!narrow.empty() && narrow.back() != '\\')
+        narrow += '\\';
+    return narrow;
 }
 
 // ─── Source-2 / CS2 physics loader (VPK → vmdl_c → PHYS → KV3 v5) ──────────
@@ -942,12 +987,116 @@ static void scanMeshesFromBlobs(
             MeshTri tri;
             tri.p[0] = p0;  tri.p[1] = p1;  tri.p[2] = p2;
             tri.n    = { nx, ny, nz };
+            tri.computeBounds();
             trisOut.push_back(tri);
         }
 
         // Consume both blobs and advance.
         offset += blenA + blenB;
         i      += 2;
+    }
+}
+
+// CS2 sometimes stores triangle indices as uint32×3 (12 bytes per tri) instead of uint16×3.
+static void scanMeshesUint32FromBlobs(
+    const uint8_t*               blobData,
+    size_t                       blobLen,
+    const std::vector<uint32_t>& blobLengths,
+    std::vector<MeshTri>&        trisOut)
+{
+    size_t offset = 0;
+    const size_t N = blobLengths.size();
+
+    for (size_t i = 0; i < N; ) {
+        const uint32_t blenA = blobLengths[i];
+        if (offset + blenA > blobLen) break;
+
+        if (blenA < 36 || blenA % 12 != 0) {
+            offset += blenA;
+            ++i;
+            continue;
+        }
+        const int      vertCount = static_cast<int>(blenA / 12);
+        const uint8_t* blobA     = blobData + offset;
+
+        bool allFinite = true;
+        for (int v = 0; v < vertCount && allFinite; ++v) {
+            float x, y, z;
+            std::memcpy(&x, blobA + v * 12,     4);
+            std::memcpy(&y, blobA + v * 12 + 4, 4);
+            std::memcpy(&z, blobA + v * 12 + 8, 4);
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+                allFinite = false;
+        }
+        if (!allFinite) {
+            offset += blenA;
+            ++i;
+            continue;
+        }
+
+        if (i + 1 >= N) { offset += blenA; ++i; break; }
+        const uint32_t blenB = blobLengths[i + 1];
+        if (offset + blenA + blenB > blobLen || blenB < 12 || blenB % 12 != 0) {
+            offset += blenA;
+            ++i;
+            continue;
+        }
+        const int      triCount = static_cast<int>(blenB / 12);
+        const uint8_t* blobB    = blobData + offset + blenA;
+
+        bool indicesOk = true;
+        for (int t = 0; t < triCount && indicesOk; ++t) {
+            uint32_t ia, ib, ic;
+            std::memcpy(&ia, blobB + t * 12,     4);
+            std::memcpy(&ib, blobB + t * 12 + 4, 4);
+            std::memcpy(&ic, blobB + t * 12 + 8, 4);
+            if (ia >= static_cast<uint32_t>(vertCount) ||
+                ib >= static_cast<uint32_t>(vertCount) ||
+                ic >= static_cast<uint32_t>(vertCount))
+                indicesOk = false;
+        }
+        if (!indicesOk) {
+            offset += blenA;
+            ++i;
+            continue;
+        }
+
+        std::vector<Vec3> verts(static_cast<std::size_t>(vertCount));
+        for (int v = 0; v < vertCount; ++v) {
+            std::memcpy(&verts[v].x, blobA + v * 12,     4);
+            std::memcpy(&verts[v].y, blobA + v * 12 + 4, 4);
+            std::memcpy(&verts[v].z, blobA + v * 12 + 8, 4);
+        }
+
+        for (int t = 0; t < triCount && trisOut.size() < 2000000u; ++t) {
+            uint32_t ia, ib, ic;
+            std::memcpy(&ia, blobB + t * 12,     4);
+            std::memcpy(&ib, blobB + t * 12 + 4, 4);
+            std::memcpy(&ic, blobB + t * 12 + 8, 4);
+            if (ia == ib || ib == ic || ia == ic) continue;
+
+            const Vec3& p0 = verts[ia];
+            const Vec3& p1 = verts[ib];
+            const Vec3& p2 = verts[ic];
+
+            float e1x = p1.x - p0.x, e1y = p1.y - p0.y, e1z = p1.z - p0.z;
+            float e2x = p2.x - p0.x, e2y = p2.y - p0.y, e2z = p2.z - p0.z;
+            float nx  = e1y * e2z - e1z * e2y;
+            float ny  = e1z * e2x - e1x * e2z;
+            float nz  = e1x * e2y - e1y * e2x;
+            float len = std::sqrtf(nx * nx + ny * ny + nz * nz);
+            if (len < 1e-6f) continue;
+            nx /= len; ny /= len; nz /= len;
+
+            MeshTri tri;
+            tri.p[0] = p0; tri.p[1] = p1; tri.p[2] = p2;
+            tri.n    = { nx, ny, nz };
+            tri.computeBounds();
+            trisOut.push_back(tri);
+        }
+
+        offset += blenA + blenB;
+        i += 2;
     }
 }
 
@@ -1046,6 +1195,8 @@ static bool extractPhysBlock(const uint8_t* data, int len,
 bool BspWorld::loadFromVpk(const std::string& mapName,
                             const std::string& cs2Path)
 {
+    clear();
+
     const std::string vpkPath =
         cs2Path + "\\game\\csgo\\maps\\" + mapName + ".vpk";
 
@@ -1074,6 +1225,9 @@ bool BspWorld::loadFromVpk(const std::string& mapName,
     std::vector<uint8_t> blobBuf;
 
     for (const VpkEntry& ve : entries) {
+        if (ve.vpkPath.find("world_physics") == std::string::npos)
+            continue;
+
         std::streamoff fileOff = dataStart + (std::streamoff)ve.offset;
         f.seekg(fileOff);
         if (!f) continue;
@@ -1094,7 +1248,8 @@ bool BspWorld::loadFromVpk(const std::string& mapName,
         // Scanning blobs individually prevents runs from crossing blob boundaries,
         // which would merge planes from physically separate hulls into one big
         // (geometrically wrong) brush that passes through open air.
-        const bool isWorldPhysics = (ve.vpkPath.find("world_physics") != std::string::npos);
+        // world_physics only — prop vmdl_c hulls caused false grenade bounces.
+        const bool isWorldPhysics = true;
         if (!blobLengths.empty()) {
             const bool quiet = (blobLengths.size() > 20);
             uint64_t blobOff = 0;
@@ -1114,6 +1269,7 @@ bool BspWorld::loadFromVpk(const std::string& mapName,
             if (isWorldPhysics) {
                 size_t trisBefore = m_tris.size();
                 scanMeshesFromBlobs(blobBuf.data(), blobBuf.size(), blobLengths, m_tris);
+                scanMeshesUint32FromBlobs(blobBuf.data(), blobBuf.size(), blobLengths, m_tris);
                 std::cout << "[MeshScan] world_physics → "
                           << (m_tris.size() - trisBefore) << " triangles\n";
             }
@@ -1139,7 +1295,297 @@ bool BspWorld::loadFromVpk(const std::string& mapName,
 
     m_mapName = mapName;
     m_loaded  = true;
+
+    char summary[256];
+    std::snprintf(summary, sizeof(summary),
+        "[BSP] VPK %s: %zu mesh tris, %zu hulls (hull+mesh grenade collision)",
+        mapName.c_str(), m_tris.size(), m_brushes.size());
+    overlayFileLog(summary);
+
+    bakeCollisionMesh();
     return true;
+}
+
+std::string BspWorld::triCachePath(const std::string& mapName) {
+    const std::string dir = mapCacheDir();
+    if (dir.empty()) return {};
+    return dir + mapName + ".tri";
+}
+
+static std::filesystem::path overlayHostDirectory() {
+    wchar_t exePath[MAX_PATH]{};
+    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH))
+        return {};
+    return std::filesystem::path(exePath).parent_path();
+}
+
+struct PhysExtractPaths {
+    std::filesystem::path exe;
+    std::filesystem::path workDir;
+};
+
+static PhysExtractPaths resolvePhysExtractBundled(const std::filesystem::path& hostDir) {
+    if (hostDir.empty())
+        return {};
+
+    const auto inTools = hostDir / "phys_tools" / "PhysExtractor.exe";
+    if (std::filesystem::exists(inTools))
+        return { inTools, inTools.parent_path() };
+
+    const auto inToolsAlt = hostDir / "phys_tools" / "phys_extract.exe";
+    if (std::filesystem::exists(inToolsAlt))
+        return { inToolsAlt, inToolsAlt.parent_path() };
+
+    const auto legacy = hostDir / "phys_extract.exe";
+    if (std::filesystem::exists(legacy))
+        return { legacy, hostDir };
+
+    return {};
+}
+
+static void appendPhysExtractLogTail() {
+    wchar_t localApp[MAX_PATH]{};
+    if (!SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp)))
+        return;
+
+    const auto logPath = std::filesystem::path(localApp) / L"crymore" / L"phys_extract.log";
+    std::ifstream in(logPath);
+    if (!in)
+        return;
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty())
+            lines.push_back(std::move(line));
+    }
+    if (lines.empty())
+        return;
+
+    const std::size_t start = lines.size() > 8 ? lines.size() - 8 : 0;
+    for (std::size_t i = start; i < lines.size(); ++i)
+        overlayFileLog("[BSP] phys_extract: " + lines[i]);
+}
+
+static std::wstring wideFromUtf8(const std::string& s) {
+    if (s.empty())
+        return {};
+    const int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (len <= 1)
+        return {};
+    std::wstring w(static_cast<std::size_t>(len - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
+    return w;
+}
+
+void BspWorld::logCollisionToolkitStatus() {
+    static bool logged = false;
+    if (logged)
+        return;
+    logged = true;
+
+    const std::filesystem::path hostDir = overlayHostDirectory();
+    if (hostDir.empty()) {
+        overlayFileLog("[BSP] collision toolkit: could not resolve overlay directory");
+        return;
+    }
+
+    const std::filesystem::path bundledDir = hostDir / "mapcache";
+    if (std::filesystem::is_directory(bundledDir)) {
+        int count = 0;
+        for (const auto& e : std::filesystem::directory_iterator(bundledDir)) {
+            if (e.path().extension() == ".tri")
+                ++count;
+        }
+        if (count > 0)
+            overlayFileLog("[BSP] bundled mapcache: " + std::to_string(count) + " map(s) in payload");
+        else
+            overlayFileLog("[BSP] no bundled map tris — grenade collision needs mapcache/" + std::string("*.tri"));
+    } else {
+        overlayFileLog("[BSP] no bundled mapcache — republish overlay with map tris");
+    }
+}
+
+bool BspWorld::extractTriCache(const std::string& mapName, const std::string& cs2Path) {
+    if (mapName.empty())
+        return false;
+
+    const std::filesystem::path hostDir = overlayHostDirectory();
+    if (hostDir.empty())
+        return false;
+
+    const PhysExtractPaths paths = resolvePhysExtractBundled(hostDir);
+    if (paths.exe.empty()) {
+        overlayFileLog("[BSP] no phys_extract — copy mapcache/" + mapName + ".tri to %LOCALAPPDATA%\\crymore\\mapcache\\");
+        return false;
+    }
+
+    const auto coreClr = paths.workDir / "coreclr.dll";
+    if (!std::filesystem::exists(coreClr)) {
+        overlayFileLog("[BSP] phys_tools incomplete (coreclr.dll missing) — republish overlay");
+        return false;
+    }
+
+    const std::filesystem::path triDir = mapCacheDirPath();
+    if (triDir.empty())
+        return false;
+
+    std::wstring wCmd = L"\"" + paths.exe.wstring() + L"\" --map " + wideFromUtf8(mapName)
+        + L" --tri-dir \"" + triDir.wstring() + L"\"";
+
+    const std::filesystem::path vpkPath = !cs2Path.empty()
+        ? std::filesystem::path(cs2Path) / "game" / "csgo" / "maps" / (mapName + ".vpk")
+        : std::filesystem::path{};
+    if (!cs2Path.empty() && std::filesystem::exists(vpkPath)) {
+        wCmd += L" --cs2-path \"" + wideFromUtf8(cs2Path) + L"\"";
+    } else {
+        overlayFileLog("[BSP] phys_extract auto-locating CS2 (map VPK not at detected install path)");
+    }
+
+    overlayFileLog("[BSP] Extracting collision for " + mapName + " (first launch may take ~30s)...");
+
+    wchar_t localApp[MAX_PATH]{};
+    std::wstring logPathW;
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp)))
+        logPathW = (std::filesystem::path(localApp) / L"crymore" / L"phys_extract.log").wstring();
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    HANDLE hNullIn = CreateFileW(L"NUL", GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+
+    HANDLE hLog = INVALID_HANDLE_VALUE;
+    if (!logPathW.empty()) {
+        hLog = CreateFileW(logPathW.c_str(), FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    const bool redirect = (hNullIn != INVALID_HANDLE_VALUE && hLog != INVALID_HANDLE_VALUE);
+    if (redirect) {
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdInput  = hNullIn;
+        si.hStdOutput = hLog;
+        si.hStdError  = hLog;
+    }
+
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cmdBuf(wCmd.begin(), wCmd.end());
+    cmdBuf.push_back(L'\0');
+
+    const std::wstring wWork = paths.workDir.wstring();
+    const BOOL created = CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, redirect ? TRUE : FALSE,
+        CREATE_NO_WINDOW, nullptr, wWork.c_str(), &si, &pi);
+
+    if (hNullIn != INVALID_HANDLE_VALUE)
+        CloseHandle(hNullIn);
+
+    if (!created) {
+        overlayFileLog("[BSP] phys_extract launch failed (error " +
+            std::to_string(GetLastError()) + ")");
+        if (hLog != INVALID_HANDLE_VALUE)
+            CloseHandle(hLog);
+        return false;
+    }
+
+    const DWORD wait = WaitForSingleObject(pi.hProcess, 180000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (hLog != INVALID_HANDLE_VALUE)
+        CloseHandle(hLog);
+
+    if (wait != WAIT_OBJECT_0) {
+        overlayFileLog("[BSP] phys_extract timed out for " + mapName);
+        return false;
+    }
+    if (exitCode != 0) {
+        char errMsg[160];
+        std::snprintf(errMsg, sizeof(errMsg),
+            "[BSP] phys_extract failed exit=0x%08X for %s",
+            exitCode, mapName.c_str());
+        overlayFileLog(errMsg);
+        if (exitCode == 0xE0434352u) {
+            overlayFileLog("[BSP] .NET crash — republish overlay or copy mapcache/" + mapName + ".tri");
+            appendPhysExtractLogTail();
+        }
+        return false;
+    }
+
+    const std::string triPath = triCachePath(mapName);
+    if (!std::filesystem::exists(triPath)) {
+        overlayFileLog("[BSP] phys_extract finished but tri cache missing: " + triPath);
+        return false;
+    }
+
+    const auto sz = static_cast<std::size_t>(std::filesystem::file_size(triPath));
+    if (sz < 36 || sz % 36 != 0) {
+        overlayFileLog("[BSP] phys_extract wrote invalid tri file size=" + std::to_string(sz));
+        return false;
+    }
+    const std::size_t triCount = sz / 36;
+    if (triCount < 10000) {
+        overlayFileLog("[BSP] phys_extract wrote too few triangles: " + std::to_string(triCount));
+        return false;
+    }
+
+    char msg[128];
+    std::snprintf(msg, sizeof(msg), "[BSP] phys_extract wrote %zu triangles", triCount);
+    overlayFileLog(msg);
+    return true;
+}
+
+bool BspWorld::saveTriCache(const std::string& mapName) const {
+    if (m_tris.empty())
+        return false;
+
+    const std::string path = triCachePath(mapName);
+    if (path.empty())
+        return false;
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out)
+        return false;
+
+    for (const MeshTri& tri : m_tris) {
+        const float v[9] = {
+            tri.p[0].x, tri.p[0].y, tri.p[0].z,
+            tri.p[1].x, tri.p[1].y, tri.p[1].z,
+            tri.p[2].x, tri.p[2].y, tri.p[2].z,
+        };
+        out.write(reinterpret_cast<const char*>(v), sizeof(v));
+    }
+
+    char msg[160];
+    std::snprintf(msg, sizeof(msg),
+        "[BSP] Cached %zu triangles -> mapcache/%s.tri", m_tris.size(), mapName.c_str());
+    overlayFileLog(msg);
+    return static_cast<bool>(out);
+}
+
+void BspWorld::bakeCollisionMesh() {
+    if (!m_tris.empty())
+        buildTriGrid();
+    if (!m_brushes.empty())
+        buildBrushGrid();
+
+    if (m_tris.size() >= 50000) {
+        overlayFileLog("[BSP] Dense mesh baked in memory (tri-only collision)");
+    } else if (!m_brushes.empty()) {
+        char msg[128];
+        std::snprintf(msg, sizeof(msg),
+            "[BSP] Using %zu hulls + %zu tris for grenades", m_brushes.size(), m_tris.size());
+        overlayFileLog(msg);
+    }
 }
 
 // ─── Per-brush convex sweep ───────────────────────────────────────────────────
@@ -1199,110 +1645,6 @@ bool BspWorld::sweepBrush(const Vec3& a, const Vec3& b,
 // pass through in reality.
 static constexpr float kSphereR = 2.0f;
 
-bool BspWorld::sweepTris(const Vec3& a, const Vec3& b,
-                          float& t_hit, Vec3& norm) const
-{
-    if (m_tris.empty()) return false;
-
-    const float dirX = b.x - a.x, dirY = b.y - a.y, dirZ = b.z - a.z;
-
-    // Broad AABB of the query segment (padded by sphere radius).
-    const float smnX = std::min(a.x, b.x) - kSphereR;
-    const float smxX = std::max(a.x, b.x) + kSphereR;
-    const float smnY = std::min(a.y, b.y) - kSphereR;
-    const float smxY = std::max(a.y, b.y) + kSphereR;
-    const float smnZ = std::min(a.z, b.z) - kSphereR;
-    const float smxZ = std::max(a.z, b.z) + kSphereR;
-
-    const int cx0 = static_cast<int>(std::floorf(smnX / kTriGridCell));
-    const int cx1 = static_cast<int>(std::floorf(smxX / kTriGridCell));
-    const int cy0 = static_cast<int>(std::floorf(smnY / kTriGridCell));
-    const int cy1 = static_cast<int>(std::floorf(smxY / kTriGridCell));
-
-    float bestT   = 2.f;
-    int   bestIdx = -1;
-
-    for (int cx = cx0; cx <= cx1; ++cx) {
-        for (int cy = cy0; cy <= cy1; ++cy) {
-            const int64_t key = (static_cast<int64_t>(static_cast<int32_t>(cx)) << 32)
-                              | static_cast<uint32_t>(static_cast<int32_t>(cy));
-            const auto it = m_triGrid.find(key);
-            if (it == m_triGrid.end()) continue;
-
-            for (uint32_t ti : it->second) {
-                const MeshTri& tri = m_tris[ti];
-
-                // Z-range reject against padded query Z.
-                const float triMnZ = std::min({ tri.p[0].z, tri.p[1].z, tri.p[2].z });
-                const float triMxZ = std::max({ tri.p[0].z, tri.p[1].z, tri.p[2].z });
-                if (triMxZ + kSphereR < smnZ || triMnZ - kSphereR > smxZ) continue;
-
-                // Segment must be approaching from the positive-normal side.
-                const float dDotN = dirX * tri.n.x + dirY * tri.n.y + dirZ * tri.n.z;
-                if (dDotN >= -1e-6f) continue;
-
-                // Signed distance of start point from the triangle plane.
-                const float dA = (a.x - tri.p[0].x) * tri.n.x
-                               + (a.y - tri.p[0].y) * tri.n.y
-                               + (a.z - tri.p[0].z) * tri.n.z;
-                // Sphere expansion: hit when dA reaches kSphereR from inside.
-                if (dA <= kSphereR) continue;  // already inside sphere range
-
-                const float t = (dA - kSphereR) / (-dDotN);
-                if (t <= 0.f || t >= bestT) continue;
-
-                // Contact point on the triangle plane (sphere centre − n * R).
-                const float Px = a.x + t * dirX - tri.n.x * kSphereR;
-                const float Py = a.y + t * dirY - tri.n.y * kSphereR;
-                const float Pz = a.z + t * dirZ - tri.n.z * kSphereR;
-
-                // Inside-triangle test: cross product of each edge × (P − vertex)
-                // must align with the triangle normal.
-                {
-                    float ex = tri.p[1].x - tri.p[0].x;
-                    float ey = tri.p[1].y - tri.p[0].y;
-                    float ez = tri.p[1].z - tri.p[0].z;
-                    float vx = Px - tri.p[0].x;
-                    float vy = Py - tri.p[0].y;
-                    float vz = Pz - tri.p[0].z;
-                    if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f)
-                        continue;
-                }
-                {
-                    float ex = tri.p[2].x - tri.p[1].x;
-                    float ey = tri.p[2].y - tri.p[1].y;
-                    float ez = tri.p[2].z - tri.p[1].z;
-                    float vx = Px - tri.p[1].x;
-                    float vy = Py - tri.p[1].y;
-                    float vz = Pz - tri.p[1].z;
-                    if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f)
-                        continue;
-                }
-                {
-                    float ex = tri.p[0].x - tri.p[2].x;
-                    float ey = tri.p[0].y - tri.p[2].y;
-                    float ez = tri.p[0].z - tri.p[2].z;
-                    float vx = Px - tri.p[2].x;
-                    float vy = Py - tri.p[2].y;
-                    float vz = Pz - tri.p[2].z;
-                    if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f)
-                        continue;
-                }
-
-                bestT   = t;
-                bestIdx = static_cast<int>(ti);
-            }
-        }
-    }
-
-    if (bestIdx >= 0) {
-        t_hit = bestT;
-        norm  = m_tris[bestIdx].n;
-        return true;
-    }
-    return false;
-}
-
 // ─── BspWorld::sweep ─────────────────────────────────────────────────────────
 uint32_t& BspWorld::sweepCounter() {
     thread_local uint32_t counter = 0;
@@ -1357,9 +1699,11 @@ bool BspWorld::sweepTrisInternal(const Vec3& a, const Vec3& b,
 
                 const MeshTri& tri = m_tris[ti];
 
-                const float triMnZ = std::min({ tri.p[0].z, tri.p[1].z, tri.p[2].z });
-                const float triMxZ = std::max({ tri.p[0].z, tri.p[1].z, tri.p[2].z });
-                if (triMxZ + kSphereR < smnZ || triMnZ - kSphereR > smxZ) continue;
+                // Broad-phase AABB reject against the padded query box (precomputed
+                // triangle bounds — no per-test min/max recomputation).
+                if (tri.mxX + kSphereR < smnX || tri.mnX - kSphereR > smxX) continue;
+                if (tri.mxY + kSphereR < smnY || tri.mnY - kSphereR > smxY) continue;
+                if (tri.mxZ + kSphereR < smnZ || tri.mnZ - kSphereR > smxZ) continue;
 
                 const float dDotN = dirX * tri.n.x + dirY * tri.n.y + dirZ * tri.n.z;
                 if (dDotN >= -1e-6f) continue;
@@ -1459,6 +1803,8 @@ bool BspWorld::sweep(const Vec3& a, const Vec3& b,
     uint32_t& sweepId = sweepCounter();
     ++sweepId;
 
+    // Grenade / closest-hit queries use world_physics hulls + mesh together.
+    // (Prop hulls are excluded at VPK load; mesh-only mode dropped ~515k tris vs ~3k.)
     // ── Brush sweep via spatial grid (O(1) per query instead of O(n)) ──────
     if (!m_brushGrid.empty()) {
         thread_local std::vector<uint32_t> visited;
@@ -1497,7 +1843,7 @@ bool BspWorld::sweep(const Vec3& a, const Vec3& b,
                 }
             }
         }
-    } else {
+    } else if (!m_brushes.empty()) {
         // Fallback: linear scan (used when grid hasn't been built yet)
         for (const BspBrush& br : m_brushes) {
             if (br.mxX < smnX || br.mnX > smxX) continue;
@@ -1530,66 +1876,188 @@ bool BspWorld::sweep(const Vec3& a, const Vec3& b,
     return hit;
 }
 
+// ─── 2D DDA grid traversal ───────────────────────────────────────────────────
+// Amanatides–Woo voxel walk over the XY spatial grid of the given cell size.
+// Invokes fn(cx, cy) for every cell the segment [a→b] actually passes through
+// (in order from a to b), and stops early returning true as soon as fn returns
+// true.  This visits O(cellsAlongRay) cells instead of the O(W×H) full bounding
+// rectangle — the decisive win for long line-of-sight rays where the rectangle
+// scan would touch thousands of mostly-empty cells.
+template <typename F>
+static inline bool ddaWalkXY(const Vec3& a, const Vec3& b, float cell, F&& fn) {
+    const float inv = 1.f / cell;
+    const float ax = a.x * inv, ay = a.y * inv;
+    const float bx = b.x * inv, by = b.y * inv;
+
+    int cx = static_cast<int>(std::floorf(ax));
+    int cy = static_cast<int>(std::floorf(ay));
+    const int ex = static_cast<int>(std::floorf(bx));
+    const int ey = static_cast<int>(std::floorf(by));
+
+    const float dx = bx - ax;
+    const float dy = by - ay;
+
+    const int stepX = (dx > 0.f) ? 1 : ((dx < 0.f) ? -1 : 0);
+    const int stepY = (dy > 0.f) ? 1 : ((dy < 0.f) ? -1 : 0);
+
+    constexpr float kInf = std::numeric_limits<float>::max();
+    float tMaxX = kInf, tMaxY = kInf, tDeltaX = kInf, tDeltaY = kInf;
+    if (stepX != 0) {
+        tDeltaX = std::fabsf(1.f / dx);
+        const float nextX = (stepX > 0) ? (std::floorf(ax) + 1.f) : std::floorf(ax);
+        tMaxX = (nextX - ax) / dx;
+    }
+    if (stepY != 0) {
+        tDeltaY = std::fabsf(1.f / dy);
+        const float nextY = (stepY > 0) ? (std::floorf(ay) + 1.f) : std::floorf(ay);
+        tMaxY = (nextY - ay) / dy;
+    }
+
+    if (fn(cx, cy)) return true;
+
+    // Manhattan distance between start and end cell = exact DDA step count; +2 slack.
+    const int adx = (ex >= cx) ? (ex - cx) : (cx - ex);
+    const int ady = (ey >= cy) ? (ey - cy) : (cy - ey);
+    const int maxSteps = adx + ady + 2;
+    for (int i = 0; i < maxSteps && (cx != ex || cy != ey); ++i) {
+        if (tMaxX < tMaxY) {
+            cx += stepX;
+            tMaxX += tDeltaX;
+        } else {
+            cy += stepY;
+            tMaxY += tDeltaY;
+        }
+        if (fn(cx, cy)) return true;
+    }
+    return false;
+}
+
+// Swept-sphere (radius kSphereR) any-hit test of segment [a→b] against one
+// triangle.  Extracted so the visibility DDA walk and the rectangle scan share
+// identical hit logic.  smn*/smx* are the segment's padded AABB bounds.
+static inline bool triBlocks(const MeshTri& tri,
+                             const Vec3& a,
+                             float dirX, float dirY, float dirZ,
+                             float smnX, float smnY, float smnZ,
+                             float smxX, float smxY, float smxZ) {
+    if (tri.mxX + kSphereR < smnX || tri.mnX - kSphereR > smxX) return false;
+    if (tri.mxY + kSphereR < smnY || tri.mnY - kSphereR > smxY) return false;
+    if (tri.mxZ + kSphereR < smnZ || tri.mnZ - kSphereR > smxZ) return false;
+
+    const float dDotN = dirX * tri.n.x + dirY * tri.n.y + dirZ * tri.n.z;
+    if (dDotN >= -1e-6f) return false;  // not approaching from the front
+
+    const float dA = (a.x - tri.p[0].x) * tri.n.x
+                   + (a.y - tri.p[0].y) * tri.n.y
+                   + (a.z - tri.p[0].z) * tri.n.z;
+    if (dA <= kSphereR) return false;
+
+    const float t = (dA - kSphereR) / (-dDotN);
+    if (t <= 0.f || t >= 1.f) return false;  // hit must lie within the segment
+
+    const float Px = a.x + t * dirX - tri.n.x * kSphereR;
+    const float Py = a.y + t * dirY - tri.n.y * kSphereR;
+    const float Pz = a.z + t * dirZ - tri.n.z * kSphereR;
+
+    {
+        float ex = tri.p[1].x - tri.p[0].x, ey = tri.p[1].y - tri.p[0].y, ez = tri.p[1].z - tri.p[0].z;
+        float vx = Px - tri.p[0].x, vy = Py - tri.p[0].y, vz = Pz - tri.p[0].z;
+        if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f) return false;
+    }
+    {
+        float ex = tri.p[2].x - tri.p[1].x, ey = tri.p[2].y - tri.p[1].y, ez = tri.p[2].z - tri.p[1].z;
+        float vx = Px - tri.p[1].x, vy = Py - tri.p[1].y, vz = Pz - tri.p[1].z;
+        if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f) return false;
+    }
+    {
+        float ex = tri.p[0].x - tri.p[2].x, ey = tri.p[0].y - tri.p[2].y, ez = tri.p[0].z - tri.p[2].z;
+        float vx = Px - tri.p[2].x, vy = Py - tri.p[2].y, vz = Pz - tri.p[2].z;
+        if ((ey*vz - ez*vy)*tri.n.x + (ez*vx - ex*vz)*tri.n.y + (ex*vy - ey*vx)*tri.n.z < 0.f) return false;
+    }
+    return true;
+}
+
 // ─── BspWorld::sweepAny ──────────────────────────────────────────────────────
 // Fast any-hit query for visibility (line-of-sight) checks.
-// Early-exits on FIRST hit — no closest-hit search.  Huge speedup for blocked
-// rays (the common case near walls).
+// Early-exits on FIRST hit — no closest-hit search.  Walks only the grid cells
+// the ray crosses (DDA) rather than the full bounding rectangle, so cost scales
+// with ray length instead of ray length squared — the main speedup when
+// visibility checks are enabled and enemies are far away.
 bool BspWorld::sweepAny(const Vec3& a, const Vec3& b) const {
     if (!m_loaded) return false;
-
-    const float smnX = std::min(a.x, b.x) - 1.f,  smxX = std::max(a.x, b.x) + 1.f;
-    const float smnY = std::min(a.y, b.y) - 1.f,  smxY = std::max(a.y, b.y) + 1.f;
-    const float smnZ = std::min(a.z, b.z) - 1.f,  smxZ = std::max(a.z, b.z) + 1.f;
 
     uint32_t& sweepId = sweepCounter();
     ++sweepId;
 
-    // ── Brush sweep — early-exit on first hit ───────────────────────────
+    // ── Brush sweep — DDA along the ray, early-exit on first hit ────────────
     if (!m_brushGrid.empty()) {
+        const float smnX = std::min(a.x, b.x) - 1.f,  smxX = std::max(a.x, b.x) + 1.f;
+        const float smnY = std::min(a.y, b.y) - 1.f,  smxY = std::max(a.y, b.y) + 1.f;
+        const float smnZ = std::min(a.z, b.z) - 1.f,  smxZ = std::max(a.z, b.z) + 1.f;
+
         thread_local std::vector<uint32_t> visited;
         if (visited.size() < m_brushes.size())
             visited.resize(m_brushes.size());
 
-        const int cx0 = static_cast<int>(std::floorf(smnX / kBrushGridCell));
-        const int cx1 = static_cast<int>(std::floorf(smxX / kBrushGridCell));
-        const int cy0 = static_cast<int>(std::floorf(smnY / kBrushGridCell));
-        const int cy1 = static_cast<int>(std::floorf(smxY / kBrushGridCell));
-
-        for (int cx = cx0; cx <= cx1; ++cx) {
-            for (int cy = cy0; cy <= cy1; ++cy) {
-                const int64_t key = (static_cast<int64_t>(static_cast<int32_t>(cx)) << 32)
-                                  | static_cast<uint32_t>(static_cast<int32_t>(cy));
-                const auto it = m_brushGrid.find(key);
-                if (it == m_brushGrid.end()) continue;
-
-                for (uint32_t bi : it->second) {
-                    if (visited[bi] == sweepId) continue;
-                    visited[bi] = sweepId;
-
-                    const BspBrush& br = m_brushes[bi];
-                    if (br.mxX < smnX || br.mnX > smxX) continue;
-                    if (br.mxY < smnY || br.mnY > smxY) continue;
-                    if (br.mxZ < smnZ || br.mnZ > smxZ) continue;
-
-                    float t;
-                    Vec3  n;
-                    if (sweepBrush(a, b, br, t, n))
-                        return true;  // any hit = blocked
-                }
+        const bool blocked = ddaWalkXY(a, b, kBrushGridCell, [&](int cx, int cy) -> bool {
+            const int64_t key = (static_cast<int64_t>(static_cast<int32_t>(cx)) << 32)
+                              | static_cast<uint32_t>(static_cast<int32_t>(cy));
+            const auto it = m_brushGrid.find(key);
+            if (it == m_brushGrid.end()) return false;
+            for (uint32_t bi : it->second) {
+                if (visited[bi] == sweepId) continue;
+                visited[bi] = sweepId;
+                const BspBrush& br = m_brushes[bi];
+                if (br.mxX < smnX || br.mnX > smxX) continue;
+                if (br.mxY < smnY || br.mnY > smxY) continue;
+                if (br.mxZ < smnZ || br.mnZ > smxZ) continue;
+                float t; Vec3 n;
+                if (sweepBrush(a, b, br, t, n)) return true;  // any hit = blocked
             }
-        }
-    } else {
+            return false;
+        });
+        if (blocked) return true;
+    } else if (!m_brushes.empty()) {
+        // Fallback: linear scan (grid not built yet).
+        const float smnX = std::min(a.x, b.x) - 1.f,  smxX = std::max(a.x, b.x) + 1.f;
+        const float smnY = std::min(a.y, b.y) - 1.f,  smxY = std::max(a.y, b.y) + 1.f;
+        const float smnZ = std::min(a.z, b.z) - 1.f,  smxZ = std::max(a.z, b.z) + 1.f;
         for (const BspBrush& br : m_brushes) {
             if (br.mxX < smnX || br.mnX > smxX) continue;
             if (br.mxY < smnY || br.mnY > smxY) continue;
             if (br.mxZ < smnZ || br.mnZ > smxZ) continue;
-            float t;
-            Vec3  n;
-            if (sweepBrush(a, b, br, t, n))
-                return true;
+            float t; Vec3 n;
+            if (sweepBrush(a, b, br, t, n)) return true;
         }
     }
 
-    // Triangle mesh — any-hit with dedup.
-    return sweepTrisAny(a, b, sweepId);
+    // ── Triangle mesh — DDA along the ray, any-hit with per-sweep dedup ─────
+    if (!m_tris.empty()) {
+        const float dirX = b.x - a.x, dirY = b.y - a.y, dirZ = b.z - a.z;
+        const float smnX = std::min(a.x, b.x) - kSphereR, smxX = std::max(a.x, b.x) + kSphereR;
+        const float smnY = std::min(a.y, b.y) - kSphereR, smxY = std::max(a.y, b.y) + kSphereR;
+        const float smnZ = std::min(a.z, b.z) - kSphereR, smxZ = std::max(a.z, b.z) + kSphereR;
+
+        std::vector<uint32_t>& visited = triVisited();
+        if (visited.size() < m_tris.size())
+            visited.resize(m_tris.size());
+
+        const bool blocked = ddaWalkXY(a, b, kTriGridCell, [&](int cx, int cy) -> bool {
+            const int64_t key = (static_cast<int64_t>(static_cast<int32_t>(cx)) << 32)
+                              | static_cast<uint32_t>(static_cast<int32_t>(cy));
+            const auto it = m_triGrid.find(key);
+            if (it == m_triGrid.end()) return false;
+            for (uint32_t ti : it->second) {
+                if (visited[ti] == sweepId) continue;
+                visited[ti] = sweepId;
+                if (triBlocks(m_tris[ti], a, dirX, dirY, dirZ,
+                              smnX, smnY, smnZ, smxX, smxY, smxZ))
+                    return true;
+            }
+            return false;
+        });
+        if (blocked) return true;
+    }
+
+    return false;
 }

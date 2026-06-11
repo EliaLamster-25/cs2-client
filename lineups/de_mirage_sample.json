@@ -1,0 +1,30 @@
+{
+  "id": "mirage_sample",
+  "name": "Mirage basics",
+  "map": "de_mirage",
+  "description": "Sample smoke lineups for testing the grenade helper.",
+  "spots": [
+    {
+      "id": "a_site_smoke",
+      "title": "A Site smoke",
+      "description": "Blocks CT ramp from T spawn",
+      "grenade": "smoke",
+      "stand": [-735.0, -780.0, 84.0],
+      "stand_radius": 20,
+      "aim_point": [-650.0, -620.0, 120.0],
+      "throw": "jump_throw",
+      "instruction": "Jump + throw"
+    },
+    {
+      "id": "mid_smoke",
+      "title": "Mid smoke",
+      "description": "Covers connector from T stairs",
+      "grenade": "smoke",
+      "stand": [-580.0, -920.0, 84.0],
+      "stand_radius": 18,
+      "aim_point": [-420.0, -880.0, 110.0],
+      "throw": "throw",
+      "instruction": "Throw"
+    }
+  ]
+}

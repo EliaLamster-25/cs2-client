@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>register — crymore.pw</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="/">
+        <img src="/assets/logo.png" alt="" width="40" height="40" />
+        <div class="brand-text"><strong>crymore.pw</strong><span>register</span></div>
+      </a>
+      <div class="nav-links"><a class="link" href="/login.html">login</a></div>
+    </nav>
+
+    <div class="card auth-card">
+      <h2>create account</h2>
+      <p>Invite code required. Pick a username — you'll use it in the loader.</p>
+      <div id="msg" class="msg hidden"></div>
+      <form id="register-form">
+        <div class="field">
+          <label for="invite_code">invite code</label>
+          <input id="invite_code" name="invite_code" type="text" required placeholder="CRY-XXXXX-XXXXX" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="email">email</label>
+          <input id="email" name="email" type="email" required autocomplete="email" />
+        </div>
+        <div class="field">
+          <label for="username">username</label>
+          <input id="username" name="username" type="text" required pattern="[a-z0-9_]{3,32}" autocomplete="username" />
+        </div>
+        <div class="field">
+          <label for="password">password</label>
+          <input id="password" name="password" type="password" required minlength="8" autocomplete="new-password" />
+        </div>
+        <button class="btn btn-primary" type="submit">create account</button>
+      </form>
+    </div>
+  </div>
+  <script src="/app.js"></script>
+  <script>Crymore.registerForm(document.getElementById('register-form'), document.getElementById('msg'));</script>
+</body>
+</html>

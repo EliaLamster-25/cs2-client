@@ -1,5 +1,7 @@
-#include "entity_manager.h"
+﻿#include "entity_manager.h"
+#include "pawn_services.h"
 #include "str_obf.h"
+#include "debug/overlay_log.h"
 #include "memory/rpm.h"
 #include "offsets/offsets.h"
 #include "offsets/netvars.h"
@@ -12,6 +14,7 @@
 #include <iostream>
 #include <iomanip>
 #include <vector>
+#include <thread>
 
 /// @file entity_manager.cpp
 /// @brief Full implementation of the per-frame entity read loop.
@@ -152,9 +155,111 @@ bool hasLineOfSight(const BspWorld& world, const Vec3& eye, const Vec3& target, 
     dir = dir * (1.f / len);
     const Vec3 start = eye + dir * 2.0f;
 
-    // Use any-hit sweep — early exits on first blocking geometry,
+    // Use any-hit sweep â€” early exits on first blocking geometry,
     // orders of magnitude faster than closest-hit sweep for visibility checks.
     return !world.sweepAny(start, target);
+}
+
+struct ChamsSegDef { int a; int b; int midSlot; };
+
+static constexpr ChamsSegDef kChamsSegDefs[PlayerData::kChamsSegCount] = {
+    { 0, 22, 0 }, { 22, 23, 1 }, { 23, 24, 2 },
+    { 0, 25, 3 }, { 25, 26, 4 }, { 26, 27, 5 },
+    { 5, 8, 6 }, { 8, 9, 7 }, { 9, 11, 8 },
+    { 5, 13, 9 }, { 13, 14, 10 }, { 14, 16, 11 },
+    { 0, 2, 12 }, { 2, 4, 13 }, { 4, 5, 14 }, { 5, 6, 15 },
+};
+
+static constexpr int kChamsBones[] = {
+    0, 2, 4, 5, 6, 8, 9, 11, 13, 14, 16, 22, 23, 24, 25, 26, 27
+};
+
+static void fillChamsPartVisibility(PlayerData& p, bool visible) {
+    p.chamsPartVisChecked = true;
+    for (int i = 0; i < PlayerData::kBoneCount; ++i)
+        p.chamsPartVisible[i] = visible;
+    for (int i = 0; i < PlayerData::kChamsSegCount; ++i)
+        p.chamsSegMidVisible[i] = visible;
+}
+
+static void updateChamsPartVisibility(PlayerData& p,
+                                      const BspWorld& world,
+                                      GameTraceVis* gameTrace,
+                                      Process* proc,
+                                      std::uintptr_t localPawn,
+                                      const Vec3& localEye,
+                                      bool eyeInsideWall,
+                                      bool useGameTrace,
+                                      bool useBspVis)
+{
+    auto mainVisFallback = [&]() -> bool {
+        if (!g_cfg.visibilityCheckEnabled || !p.visibilityChecked)
+            return true;
+        return p.isVisible;
+    };
+
+    auto checkLos = [&](const Vec3& pt) -> bool {
+        if (useGameTrace && gameTrace && proc && localPawn)
+            return gameTrace->hasLineOfSight(*proc, localPawn, p.pawn, localEye, pt);
+        if (useBspVis)
+            return hasLineOfSight(world, localEye, pt, eyeInsideWall);
+        return mainVisFallback();
+    };
+
+    if (!p.bonesValid || !p.isValid || !p.isAlive || p.isLocalPlayer) {
+        p.chamsPartVisChecked = false;
+        return;
+    }
+
+    if (!useGameTrace && (!useBspVis || !world.isLoaded())) {
+        fillChamsPartVisibility(p, mainVisFallback());
+        return;
+    }
+
+    if (g_cfg.visibilityCheckEnabled && p.visibilityChecked) {
+        const float conf = p.visibilityConfidence;
+        if (!p.isVisible && conf < 0.18f) {
+            fillChamsPartVisibility(p, false);
+            return;
+        }
+        if (p.isVisible && conf > 0.85f) {
+            fillChamsPartVisibility(p, true);
+            return;
+        }
+    }
+
+    p.chamsPartVisChecked = true;
+    for (int i = 0; i < PlayerData::kBoneCount; ++i)
+        p.chamsPartVisible[i] = false;
+
+    for (int boneIndex : kChamsBones) {
+        if (boneIndex < 0 || boneIndex >= PlayerData::kBoneCount)
+            continue;
+        const Vec3& pt = p.bones[boneIndex];
+        if (!isFiniteVec3(pt))
+            continue;
+        p.chamsPartVisible[boneIndex] = checkLos(pt);
+    }
+
+    for (const auto& seg : kChamsSegDefs) {
+        if (seg.a < 0 || seg.b < 0
+            || seg.a >= PlayerData::kBoneCount || seg.b >= PlayerData::kBoneCount
+            || seg.midSlot < 0 || seg.midSlot >= PlayerData::kChamsSegCount)
+            continue;
+
+        const Vec3& a = p.bones[seg.a];
+        const Vec3& b = p.bones[seg.b];
+        if (!isFiniteVec3(a) || !isFiniteVec3(b)) {
+            p.chamsSegMidVisible[seg.midSlot] = false;
+            continue;
+        }
+        const Vec3 mid = {
+            (a.x + b.x) * 0.5f,
+            (a.y + b.y) * 0.5f,
+            (a.z + b.z) * 0.5f,
+        };
+        p.chamsSegMidVisible[seg.midSlot] = checkLos(mid);
+    }
 }
 
 int collectVisibilitySamples(const PlayerData& p, int mode, Vec3* out, int cap) {
@@ -168,7 +273,7 @@ int collectVisibilitySamples(const PlayerData& p, int mode, Vec3* out, int cap) 
     };
 
     // Reduced sample counts for performance: Fast=1, Balanced=2, Strict=3
-    // (was Fast=2, Balanced=3, Strict=7 — the brush spatial grid makes per-sweep
+    // (was Fast=2, Balanced=3, Strict=7 â€” the brush spatial grid makes per-sweep
     //  cost negligible, but fewer sweeps still saves proportional time.)
     push(p.headPos);  // always check the head
 
@@ -454,7 +559,7 @@ void consumeRemainingTravelPreview(const BspWorld& world,
 }
 
 bool EntityManager::init(const Process& proc) {
-    // ── Detect CS2 install path from Steam registry ────────────────────────
+    // â”€â”€ Detect CS2 install path from Steam registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     m_cs2Path.clear();
     {
         // Steam stores its install path in two registry locations.
@@ -476,6 +581,22 @@ bool EntityManager::init(const Process& proc) {
                 if (!m_cs2Path.empty()) break;
             }
         }
+        if (m_cs2Path.empty()) {
+            HKEY hk{};
+            if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam", 0, KEY_READ, &hk) == ERROR_SUCCESS) {
+                char buf[512]{};
+                DWORD sz = sizeof(buf);
+                if (RegQueryValueExA(hk, "SteamPath", nullptr, nullptr,
+                                     reinterpret_cast<LPBYTE>(buf), &sz) == ERROR_SUCCESS) {
+                    std::string steamPath = buf;
+                    if (!steamPath.empty() && (steamPath.back() == '\\' || steamPath.back() == '/'))
+                        steamPath.pop_back();
+                    m_cs2Path = steamPath +
+                        "\\steamapps\\common\\Counter-Strike Global Offensive";
+                }
+                RegCloseKey(hk);
+            }
+        }
         if (!m_cs2Path.empty())
             std::cout << "[EntityManager] CS2 path: " << m_cs2Path << '\n';
         else {
@@ -486,6 +607,11 @@ bool EntityManager::init(const Process& proc) {
         }
     }
     m_clientBase = proc.getModuleBase(OBFW("\xC8\xC7\xC2\xCE\xC5\xDF\x85\xCF\xC7\xC7", 0xAB));
+    for (int attempt = 0; !m_clientBase && attempt < 15; ++attempt) {
+        std::cout << "[EntityManager] Waiting for client.dll to load...\n";
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        m_clientBase = proc.getModuleBase(OBFW("\xC8\xC7\xC2\xCE\xC5\xDF\x85\xCF\xC7\xC7", 0xAB));
+    }
     if (!m_clientBase) {
         std::cerr << "[EntityManager] client.dll not found!\n";
         return false;
@@ -498,36 +624,38 @@ bool EntityManager::init(const Process& proc) {
         std::cout << "[EntityManager] engine2.dll @ 0x"
                   << std::hex << m_engine2Base << std::dec << '\n';
     else
-        std::cerr << "[EntityManager] engine2.dll not found — BSP collision disabled\n";
+        std::cerr << "[EntityManager] engine2.dll not found â€” BSP collision disabled\n";
 
     offsets::resolveRuntime(proc, m_clientBase);
+    if (m_engine2Base)
+        offsets::resolveEngine2Runtime(proc, m_engine2Base);
+
+    m_frames[0] = std::make_shared<Snapshot>();
+    m_frames[1] = std::make_shared<Snapshot>();
+    m_readSlot.store(0, std::memory_order_release);
 
     return true;
 }
 
-void EntityManager::update(const Process& proc) {
+void EntityManager::update(Process& proc) {
     auto isLikelyPtr = [](std::uintptr_t p) -> bool {
         return p > 0x10000ull && p < 0x00007FFFFFFFFFFFull;
     };
 
-    // ── Per-section timers ───────────────────────────────────────────────────
+    // â”€â”€ Per-section timers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     auto tNow = std::chrono::steady_clock::now();
     auto tMark = tNow;
-    auto mark = [&](const char* name) {
-        auto prev = tMark;
+    auto mark = [&](const char* /*name*/) {
         tMark = std::chrono::steady_clock::now();
-        auto us = std::chrono::duration_cast<std::chrono::microseconds>(tMark - prev).count();
-        if (us > 6000)
-            std::printf("[TIMING] %-20s %lldus\n", name, us);
     };
 
-    // ── 1. Read the view matrix into a local copy ─────────────────────────────
+    // â”€â”€ 1. Read the view matrix into a local copy â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ViewMatrix tmpVm{};
     mem::readArray(proc,
                    m_clientBase + offsets::client::dwViewMatrix,
                    &tmpVm.m[0][0], 16);
 
-    // ── 2. Resolve local player's team ────────────────────────────────────────
+    // â”€â”€ 2. Resolve local player's team â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     auto localController = mem::read<std::uintptr_t>(
         proc, m_clientBase + offsets::client::dwLocalPlayerController);
 
@@ -537,7 +665,7 @@ void EntityManager::update(const Process& proc) {
     auto entityList = mem::read<std::uintptr_t>(
         proc, m_clientBase + offsets::client::dwEntityList);
 
-    // Player slots 1-64 all live in chunk 0 — read once and reuse.
+    // Player slots 1-64 all live in chunk 0 â€” read once and reuse.
     auto chunk0 = mem::read<std::uintptr_t>(proc, entityList + 0x10);
     if (!isLikelyPtr(chunk0)) chunk0 = 0;
 
@@ -557,12 +685,18 @@ void EntityManager::update(const Process& proc) {
 
     std::uint32_t localPawnHandle = 0;
     std::uintptr_t localPawn = isLikelyPtr(localPawnDirect) ? localPawnDirect : 0;
+    int tmpLocalPing = -1;
     if (isLikelyPtr(localController)) {
         localPawnHandle = mem::read<std::uint32_t>(
             proc, localController + netvars::controller::m_hPlayerPawn);
         auto handlePawn = resolveHandleEntity(localPawnHandle);
         if (isLikelyPtr(handlePawn))
             localPawn = handlePawn;
+
+        const auto ping = mem::read<std::uint32_t>(
+            proc, localController + netvars::controller::m_iPing);
+        if (ping <= 999u)
+            tmpLocalPing = static_cast<int>(ping);
     }
 
     const bool armorInfoNeeded = g_cfg.espEnabled && g_cfg.armorEspEnabled
@@ -578,26 +712,41 @@ void EntityManager::update(const Process& proc) {
     const bool needInfoEsp = g_cfg.espEnabled
         && (g_cfg.nameEspEnabled || armorInfoNeeded || weaponInfoNeeded || ammoInfoNeeded || flagsInfoNeeded);
     const bool needPlayerEsp = g_cfg.espEnabled
-        && (g_cfg.boxEnabled || g_cfg.hpBarEnabled || g_cfg.skeletonEnabled || g_cfg.chamsEnabled || needInfoEsp);
+        && (g_cfg.boxEnabled || g_cfg.boxOccluded
+            || g_cfg.hpBarEnabled || g_cfg.hpBarOccluded
+            || g_cfg.skeletonEnabled || g_cfg.skeletonOccluded
+            || g_cfg.chamsEnabled || g_cfg.chamsOccluded
+            || needInfoEsp);
     const bool needGrenadeEsp = g_cfg.espEnabled && g_cfg.grenadeEnabled;
+    const bool needGrenadeSim = needGrenadeEsp || g_cfg.grenadeTrajectory;
     const bool needBombStatus = g_cfg.bombTimerEnabled;
     const bool needSpectatorList = g_cfg.spectatorListEnabled;
     const bool needRemotePlayers = needPlayerEsp || g_cfg.aimAssistEnabled;
-    const bool needPlayerSnapshot = needRemotePlayers || needGrenadeEsp || needBombStatus || needSpectatorList;
-    const bool needPlayerVelocity = (g_cfg.latencyMode == 2);
+    const bool needPlayerScout = true; // Player Info tab / Leetify roster (independent of ESP)
+    const bool needPlayerSnapshot = needRemotePlayers || needPlayerScout || needGrenadeSim || needBombStatus || needSpectatorList;
+    const bool needPlayerVelocity = needPlayerEsp;
     const bool needPlayerBones = g_cfg.skeletonEnabled
+        || g_cfg.skeletonOccluded
         || g_cfg.chamsEnabled
+        || g_cfg.chamsOccluded
         || g_cfg.aimAssistEnabled;
+    const bool needChamsPartVis = (g_cfg.chamsEnabled || g_cfg.chamsOccluded)
+        && g_cfg.visibilityCheckEnabled;
     // Pre-throw simulation should not depend on full ESP enablement; it is used
     // by both in-game overlay and web radar trajectory rendering.
     const bool needPreThrow = g_cfg.grenadeTrajectory;
+    const bool needSoundEsp = g_cfg.soundEspEnabled;
+    const bool needGrenadeHelper = g_cfg.grenadeHelperEnabled;
 
     int tmpLocalTeam = 0;
     if (isLikelyPtr(localPawn))
         tmpLocalTeam = mem::read<int>(proc, localPawn + netvars::pawn::m_iTeamNum);
 
     Vec3 tmpLocalEye{};
+    Vec3 tmpLocalOrigin{};
+    Vec3 tmpLocalViewAngles{};
     bool hasLocalEye = false;
+    bool hasLocalPlayer = false;
     if (isLikelyPtr(localPawn)) {
         Vec3 localOrigin{};
         auto localSceneNode = mem::read<std::uintptr_t>(
@@ -611,10 +760,16 @@ void EntityManager::update(const Process& proc) {
         Vec3 localViewOffset = mem::read<Vec3>(
             proc, localPawn + netvars::pawn::m_vecViewOffset);
         tmpLocalEye = localOrigin + localViewOffset;
+        tmpLocalOrigin = localOrigin;
         hasLocalEye = isFiniteVec3(tmpLocalEye);
+        hasLocalPlayer = isFiniteVec3(localOrigin);
+        if (hasLocalPlayer || needGrenadeHelper) {
+            const Vec2 eyeAng = mem::read<Vec2>(proc, localPawn + netvars::pawn::m_angEyeAngles);
+            tmpLocalViewAngles = Vec3{ eyeAng.x, eyeAng.y, 0.f };
+        }
     }
 
-    // ── 3. Enumerate players ──────────────────────────────────────────────────
+    // â”€â”€ 3. Enumerate players â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     std::array<PlayerData, cfg::kMaxPlayers> tmpPlayers{};
     std::array<SpectatorData, EntityManager::kMaxSpectators> tmpSpectators{};
     int playerIdx = 0;
@@ -705,18 +860,10 @@ void EntityManager::update(const Process& proc) {
 
         char rawSanitized[128]{};
         char rawLegacy[128]{};
-        SIZE_T readSan = 0;
-        SIZE_T readLegacy = 0;
-        ReadProcessMemory(proc.handle(),
-                          reinterpret_cast<LPCVOID>(controller + netvars::controller::m_sSanitizedPlayerName),
-                          rawSanitized,
-                          sizeof(rawSanitized) - 1,
-                          &readSan);
-        ReadProcessMemory(proc.handle(),
-                          reinterpret_cast<LPCVOID>(controller + netvars::controller::m_iszPlayerName),
-                          rawLegacy,
-                          sizeof(rawLegacy) - 1,
-                          &readLegacy);
+        mem::readRaw(proc, controller + netvars::controller::m_sSanitizedPlayerName,
+                     rawSanitized, sizeof(rawSanitized) - 1);
+        mem::readRaw(proc, controller + netvars::controller::m_iszPlayerName,
+                     rawLegacy, sizeof(rawLegacy) - 1);
         rawSanitized[sizeof(rawSanitized) - 1] = '\0';
         rawLegacy[sizeof(rawLegacy) - 1] = '\0';
 
@@ -752,8 +899,7 @@ void EntityManager::update(const Process& proc) {
         if (!isLikelyPtr(pawn) || !isLikelyPtr(entityList))
             return out;
 
-        const auto weapSvcPtr = mem::read<std::uintptr_t>(
-            proc, pawn + netvars::pawn::m_pWeaponServices);
+        const auto weapSvcPtr = pawn_services::readWeaponServices(proc, pawn);
         if (!isLikelyPtr(weapSvcPtr))
             return out;
 
@@ -870,7 +1016,7 @@ void EntityManager::update(const Process& proc) {
     };
 
     auto fillLocalPlayerSnapshot = [&]() {
-        if ((!needGrenadeEsp && !needBombStatus) || playerIdx >= cfg::kMaxPlayers || !isLikelyPtr(localPawn))
+        if ((!needGrenadeEsp && !needBombStatus && !needPreThrow) || playerIdx >= cfg::kMaxPlayers || !isLikelyPtr(localPawn))
             return;
 
         PlayerData& p = tmpPlayers[playerIdx++];
@@ -908,8 +1054,8 @@ void EntityManager::update(const Process& proc) {
         p.screenRelevant = tmpVm.isOnScreen(p.origin) || tmpVm.isOnScreen(p.headPos);
     };
 
-    if (needRemotePlayers && entityList) {
-        const bool needNameEsp = g_cfg.espEnabled && g_cfg.nameEspEnabled;
+    if ((needRemotePlayers || needPlayerScout) && entityList) {
+        const bool needNameEsp = (g_cfg.espEnabled && g_cfg.nameEspEnabled) || needPlayerScout;
         const bool needWeaponEsp = weaponInfoNeeded;
         const bool needAmmoEsp = ammoInfoNeeded;
         const bool needFlagsEsp = flagsInfoNeeded;
@@ -950,7 +1096,9 @@ void EntityManager::update(const Process& proc) {
             p.armor    = mem::read<int>(proc, pawn + netvars::pawn::m_ArmorValue);
             p.teamNum  = mem::read<int>(proc, pawn + netvars::pawn::m_iTeamNum);
             p.pawn     = pawn;
-            p.eyeYaw   = mem::read<Vec2>(proc, pawn + netvars::pawn::m_angEyeAngles).y;
+            const Vec2 eyeAng = mem::read<Vec2>(proc, pawn + netvars::pawn::m_angEyeAngles);
+            p.eyePitch = eyeAng.x;
+            p.eyeYaw   = eyeAng.y;
 
             auto sceneNode = mem::read<std::uintptr_t>(
                 proc, pawn + netvars::pawn::m_pGameSceneNode);
@@ -970,11 +1118,18 @@ void EntityManager::update(const Process& proc) {
             p.isLocalPlayer = (controller == localController);
             p.isAlive       = true;
             p.isValid       = true;
-            const std::uint64_t steamId = mem::read<std::uint64_t>(proc, controller + netvars::controller::m_steamID);
-            p.isBot = (steamId == 0ull);
+            const std::uint64_t rawSteamId = mem::read<std::uint64_t>(proc, controller + netvars::controller::m_steamID);
+            constexpr std::uint64_t kSteam64Base = 76561197960265728ULL;
+            std::uint64_t steamId = rawSteamId;
+            if (steamId > 0 && steamId < kSteam64Base && steamId < 10000000000ULL)
+                steamId += kSteam64Base;
+            p.steamId = steamId;
+            p.isBot = (rawSteamId == 0ull);
             p.hasDefuseKit = mem::read<std::uint8_t>(proc, controller + netvars::controller::m_bPawnHasDefuser) != 0;
             if (needPlayerVelocity)
                 p.velocity = mem::read<Vec3>(proc, pawn + netvars::grenade::m_vecVelocity);
+            if (needSoundEsp)
+                p.shotsFired = mem::read<int>(proc, pawn + netvars::pawn::m_iShotsFired);
             if (needNameEsp)
                 p.name = readPlayerName(controller);
             if (needWeaponEsp || needAmmoEsp) {
@@ -992,16 +1147,16 @@ void EntityManager::update(const Process& proc) {
                 p.isFlashed = (flashDuration > 0.05f) || (flashAlpha > 1.0f);
             }
 
-            // ── Bone world positions ───────────────────────────────────────────
-            // sceneNode + 0x1D0  →  pointer to CS2 bone world-position cache.
+            // â”€â”€ Bone world positions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // sceneNode + 0x1D0  â†’  pointer to CS2 bone world-position cache.
             // Strategy:
             //   1. Try primary offset 0x1D0 (CModelState+0x80); fall back to
             //      0x1C8 (CModelState+0x78) if the primary gives a bad pointer.
             //   2. First try reading as matrix3x4_t (12 floats=48 bytes per bone,
-            //      world position at indices 3,7,11 — the last column).
+            //      world position at indices 3,7,11 â€” the last column).
             //   3. If fewer than 4 bone positions land near the player origin,
             //      re-try reading as a plain Vec3 array (3 floats=12 bytes per
-            //      bone) — some CS2 engine builds store only position in the cache.
+            //      bone) â€” some CS2 engine builds store only position in the cache.
             //   4. Accept a partial ReadProcessMemory result so a single
             //      page-boundary miss doesn't silently kill all bones.
             p.bonesValid = false;
@@ -1049,17 +1204,14 @@ void EntityManager::update(const Process& proc) {
                     };
 
                     // Read bones once with max expected stride (16 floats = 64 bytes per bone).
-                    // Then interpret the same buffer in each known format — saves 3 RPM calls
+                    // Then interpret the same buffer in each known format â€” saves 3 RPM calls
                     // per player per frame compared to reading each format separately.
                     constexpr int kMaxBoneStride = 16;
                     float rawBoneData[kRawBoneCount * kMaxBoneStride]{};
-                    SIZE_T boneBytes = 0;
-                    ReadProcessMemory(proc.handle(),
-                                      reinterpret_cast<LPCVOID>(bonePtr),
-                                      rawBoneData, sizeof(rawBoneData), &boneBytes);
-                    const int totalFloats = static_cast<int>(boneBytes / sizeof(float));
+                    mem::readRaw(proc, bonePtr, rawBoneData, sizeof(rawBoneData));
+                    const int totalFloats = static_cast<int>(sizeof(rawBoneData) / sizeof(float));
 
-                    // Try matrix3x4 (12 floats per bone) — position at indices 3, 7, 11
+                    // Try matrix3x4 (12 floats per bone) â€” position at indices 3, 7, 11
                     {
                         const int stride = 12;
                         const int count = (std::min)(totalFloats / stride, kRawBoneCount);
@@ -1071,7 +1223,7 @@ void EntityManager::update(const Process& proc) {
                         }
                     }
 
-                    // Try 4x4 matrix (16 floats per bone) — position at indices 3, 7, 11
+                    // Try 4x4 matrix (16 floats per bone) â€” position at indices 3, 7, 11
                     {
                         const int stride = 16;
                         const int count = (std::min)(totalFloats / stride, kRawBoneCount);
@@ -1083,7 +1235,7 @@ void EntityManager::update(const Process& proc) {
                         }
                     }
 
-                    // Try 32-byte entries (8 floats per bone) — position at indices 0, 1, 2
+                    // Try 32-byte entries (8 floats per bone) â€” position at indices 0, 1, 2
                     {
                         const int stride = 8;
                         const int count = (std::min)(totalFloats / stride, kRawBoneCount);
@@ -1095,7 +1247,7 @@ void EntityManager::update(const Process& proc) {
                         }
                     }
 
-                    // Try plain Vec3 (3 floats per bone) — position at indices 0, 1, 2
+                    // Try plain Vec3 (3 floats per bone) â€” position at indices 0, 1, 2
                     {
                         const int stride = 3;
                         const int count = (std::min)(totalFloats / stride, kRawBoneCount);
@@ -1137,6 +1289,33 @@ void EntityManager::update(const Process& proc) {
         const float confThreshold = aimOnlyVis
             ? ((aimVisMode == 1) ? 0.60f : 0.50f)
             : ((mode == 0) ? 0.20f : ((mode == 1) ? 0.34f : 0.50f));
+
+        const int backend = std::clamp(g_cfg.visibilityBackend, 0, 2);
+        if (backend != 0 && !m_gameTraceInitAttempted) {
+            m_gameTraceInitAttempted = true;
+            proc.openExtendedHandle();
+            if (!m_gameTrace.init(proc, m_clientBase))
+                m_gameTraceInitFailed = true;
+        }
+
+        bool useGameTrace = false;
+        bool useBspVis = false;
+        if (backend == 0) {
+            useBspVis = m_bspWorld.isLoaded();
+        } else if (m_gameTrace.isReady()) {
+            useGameTrace = true;
+        } else {
+            useBspVis = m_bspWorld.isLoaded();
+        }
+
+        if (useGameTrace) {
+            int traceBudget = 14;
+            if (mode == 1) traceBudget = 22;
+            else if (mode == 2) traceBudget = 28;
+            if (aimOnlyVis && aimVisMode == 1)
+                traceBudget = 26;
+            m_gameTrace.beginFrame(traceBudget);
+        }
 
         // Guard: check if local eye is inside wall geometry once per frame.
         bool eyeInsideWall = false;
@@ -1222,8 +1401,13 @@ void EntityManager::update(const Process& proc) {
             if (mode == 2)
                 evalStride = (std::max)(1, evalStride - 1);
 
+            if (p.screenRelevant)
+                evalStride = 1;
+
             // Round-robin: only evaluate this player on frames where the tick aligns.
-            if (visPersist.hasState) {
+            // Always re-check players that are currently marked occluded so peeking enemies
+            // flip to visible immediately instead of waiting for their slot.
+            if (visPersist.hasState && visPersist.latchedVisible) {
                 const int playerSlot = static_cast<int>(i);
                 if ((visTick % evalStride) != (playerSlot % evalStride)) {
                     p.visibilityChecked = true;
@@ -1245,20 +1429,73 @@ void EntityManager::update(const Process& proc) {
                 continue;
             }
 
-            Vec3 samples[4]{};
+            int visibleHits = 0;
+            const int minHits = aimOnlyVis
+                ? ((aimVisMode == 1) ? 2 : 1)
+                : ((mode == 2) ? 2 : 1);
+
             int sampleCount = 0;
-            if (aimOnlyVis) {
-                samples[0] = p.headPos;
-                samples[1] = p.origin + Vec3{ 0.f, 0.f, 50.f };
-                if (aimVisMode == 1) {
-                    samples[2] = p.origin + Vec3{ 0.f, 0.f, 34.f };
-                    sampleCount = 3;
-                } else {
-                    sampleCount = 2;
+            if (useGameTrace && !aimOnlyVis) {
+                // PureLiquid-style: eye â†’ origin first; extra samples only when needed.
+                sampleCount = 1;
+                if (m_gameTrace.isPlayerVisible(proc, localPawn, p.pawn, tmpLocalEye, p.origin))
+                    visibleHits = 1;
+                if (mode >= 1 && visibleHits < minHits) {
+                    ++sampleCount;
+                    if (m_gameTrace.hasLineOfSight(proc, localPawn, p.pawn, tmpLocalEye, p.headPos))
+                        visibleHits = 1;
+                }
+                if (mode >= 2 && visibleHits < minHits) {
+                    ++sampleCount;
+                    const Vec3 chest = p.origin + Vec3{ 0.f, 0.f, 48.f };
+                    if (m_gameTrace.hasLineOfSight(proc, localPawn, p.pawn, tmpLocalEye, chest))
+                        visibleHits = 1;
                 }
             } else {
-                sampleCount = collectVisibilitySamples(p, mode, samples, 4);
+                Vec3 samples[4]{};
+                if (aimOnlyVis) {
+                    samples[0] = p.headPos;
+                    samples[1] = p.origin + Vec3{ 0.f, 0.f, 50.f };
+                    if (aimVisMode == 1) {
+                        samples[2] = p.origin + Vec3{ 0.f, 0.f, 34.f };
+                        sampleCount = 3;
+                    } else {
+                        sampleCount = 2;
+                    }
+                } else {
+                    sampleCount = collectVisibilitySamples(p, mode, samples, 4);
+                }
+                if (sampleCount <= 0) {
+                    if (visPersist.hasState) {
+                        p.visibilityChecked = true;
+                        p.isVisible = visPersist.latchedVisible;
+                        p.visibilityConfidence = visPersist.smoothedConfidence;
+                    }
+                    continue;
+                }
+
+                for (int sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx) {
+                    if (aimOnlyVis)
+                        --aimOnlyRayBudget;
+
+                    if (useGameTrace) {
+                        if (m_gameTrace.hasLineOfSight(proc, localPawn, p.pawn, tmpLocalEye, samples[sampleIdx]))
+                            ++visibleHits;
+                    } else if (useBspVis) {
+                        if (hasLineOfSight(m_bspWorld, tmpLocalEye, samples[sampleIdx], eyeInsideWall))
+                            ++visibleHits;
+                    } else {
+                        ++visibleHits;
+                    }
+
+                    if (visibleHits >= minHits)
+                        break;
+                    const int remaining = sampleCount - (sampleIdx + 1);
+                    if ((visibleHits + remaining) < minHits)
+                        break;
+                }
             }
+
             if (sampleCount <= 0) {
                 if (visPersist.hasState) {
                     p.visibilityChecked = true;
@@ -1268,28 +1505,13 @@ void EntityManager::update(const Process& proc) {
                 continue;
             }
 
-            int visibleHits = 0;
-            const int minHits = aimOnlyVis
-                ? ((aimVisMode == 1) ? 2 : 1)
-                : ((mode == 2) ? 2 : 1);
-            for (int sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx) {
-                if (aimOnlyVis)
-                    --aimOnlyRayBudget;
-
-                if (hasLineOfSight(m_bspWorld, tmpLocalEye, samples[sampleIdx], eyeInsideWall))
-                    ++visibleHits;
-
-                if (visibleHits >= minHits)
-                    break;
-                const int remaining = sampleCount - (sampleIdx + 1);
-                if ((visibleHits + remaining) < minHits)
-                    break;
-            }
-
             p.visibilityChecked = true;
             const float rawConfidence = static_cast<float>(visibleHits) / static_cast<float>(sampleCount);
             if (!visPersist.hasState)
                 visPersist.smoothedConfidence = rawConfidence;
+            else if (rawConfidence >= visPersist.smoothedConfidence)
+                visPersist.smoothedConfidence += (rawConfidence - visPersist.smoothedConfidence)
+                    * (std::max)(smoothAlpha, p.screenRelevant ? 0.92f : 0.75f);
             else
                 visPersist.smoothedConfidence += (rawConfidence - visPersist.smoothedConfidence) * smoothAlpha;
 
@@ -1310,16 +1532,17 @@ void EntityManager::update(const Process& proc) {
             const int latchFrames = std::clamp(g_cfg.visibilityLatchFrames, 0, 5);
             if (rawVisible) {
                 visPersist.occludedStreak = 0;
-                if (visPersist.visibleStreak < (latchFrames + 3))
+                if (visPersist.visibleStreak < (latchFrames + 4))
                     ++visPersist.visibleStreak;
-                if (latchFrames == 0 || visPersist.visibleStreak >= latchFrames)
+                const int showGate = (latchFrames == 0) ? 1 : (latchFrames + 1);
+                if (visPersist.visibleStreak >= showGate)
                     visPersist.latchedVisible = true;
             } else {
                 visPersist.visibleStreak = 0;
-                if (visPersist.occludedStreak < (latchFrames + 4))
+                if (visPersist.occludedStreak < (latchFrames + 6))
                     ++visPersist.occludedStreak;
-                const int occludedGate = (latchFrames == 0) ? 0 : (latchFrames + ((mode == 2) ? 1 : 0));
-                if (occludedGate == 0 || visPersist.occludedStreak >= occludedGate)
+                const int occludedGate = (latchFrames == 0) ? 2 : (latchFrames + 2);
+                if (visPersist.occludedStreak >= occludedGate)
                     visPersist.latchedVisible = false;
             }
 
@@ -1344,6 +1567,103 @@ void EntityManager::update(const Process& proc) {
         }
     }
     mark("visibility_checks");
+
+    if (needChamsPartVis && hasLocalEye) {
+        bool eyeInsideWall = false;
+        if (m_bspWorld.isLoaded()) {
+            constexpr float kGuardLen = 30.f;
+            Vec3 viewDir = { tmpVm.m[2][0], tmpVm.m[2][1], tmpVm.m[2][2] };
+            const float vdLen = viewDir.length();
+            if (vdLen > 0.001f) {
+                viewDir = viewDir * (1.f / vdLen);
+                const Vec3 behind = tmpLocalEye - viewDir * kGuardLen;
+                float guardHit = 1.f;
+                Vec3 guardNorm{};
+                if (m_bspWorld.sweep(behind, tmpLocalEye, guardHit, guardNorm) && guardHit < 0.1f)
+                    eyeInsideWall = true;
+            }
+        }
+
+        const int chamsBackend = std::clamp(g_cfg.visibilityBackend, 0, 2);
+        if (chamsBackend != 0 && !m_gameTraceInitAttempted) {
+            m_gameTraceInitAttempted = true;
+            proc.openExtendedHandle();
+            if (!m_gameTrace.init(proc, m_clientBase))
+                m_gameTraceInitFailed = true;
+        }
+
+        bool chamsUseGameTrace = false;
+        bool chamsUseBspVis = false;
+        if (chamsBackend == 0) {
+            chamsUseBspVis = m_bspWorld.isLoaded();
+        } else if (m_gameTrace.isReady()) {
+            chamsUseGameTrace = true;
+        } else {
+            chamsUseBspVis = m_bspWorld.isLoaded();
+        }
+
+        if (chamsUseGameTrace)
+            m_gameTrace.beginFrame(28);
+
+        const bool useBspVis = chamsUseBspVis;
+        const int chamsBoneCost = static_cast<int>(sizeof(kChamsBones) / sizeof(kChamsBones[0]))
+            + PlayerData::kChamsSegCount;
+        int chamsVisBudget = 220;
+
+        for (auto& p : tmpPlayers) {
+            if (!p.isValid || !p.isAlive || p.isLocalPlayer)
+                continue;
+            p.chamsPartVisChecked = false;
+        }
+
+        static int s_chamsVisRotor = 0;
+        int eligibleCount = 0;
+        int eligibleIdx[cfg::kMaxPlayers]{};
+        for (int i = 0; i < playerIdx; ++i) {
+            auto& p = tmpPlayers[i];
+            if (!p.isValid || !p.isAlive || p.isLocalPlayer || p.isDormant)
+                continue;
+            if (!p.screenRelevant && !p.bonesValid)
+                continue;
+            eligibleIdx[eligibleCount++] = i;
+        }
+
+        int updated = 0;
+        for (int pass = 0; pass < eligibleCount && chamsVisBudget >= chamsBoneCost; ++pass) {
+            const int pi = eligibleIdx[(s_chamsVisRotor + pass) % eligibleCount];
+            auto& p = tmpPlayers[pi];
+
+            updateChamsPartVisibility(p, m_bspWorld, chamsUseGameTrace ? &m_gameTrace : nullptr,
+                                      chamsUseGameTrace ? &proc : nullptr, localPawn,
+                                      tmpLocalEye, eyeInsideWall, chamsUseGameTrace, useBspVis);
+            chamsVisBudget -= chamsBoneCost;
+            ++updated;
+        }
+        if (eligibleCount > 0 && updated > 0)
+            s_chamsVisRotor = (s_chamsVisRotor + updated) % eligibleCount;
+
+        for (int i = 0; i < playerIdx; ++i) {
+            auto& p = tmpPlayers[i];
+            if (!p.isValid || !p.isAlive || p.isLocalPlayer || p.chamsPartVisChecked)
+                continue;
+            const bool whole = !g_cfg.visibilityCheckEnabled
+                || !p.visibilityChecked || p.isVisible;
+            fillChamsPartVisibility(p, whole);
+        }
+    } else {
+        for (auto& p : tmpPlayers) {
+            if (!p.isValid || !p.isAlive || p.isLocalPlayer)
+                continue;
+            const bool whole = !g_cfg.visibilityCheckEnabled
+                || !p.visibilityChecked || p.isVisible;
+            p.chamsPartVisChecked = true;
+            for (int i = 0; i < PlayerData::kBoneCount; ++i)
+                p.chamsPartVisible[i] = whole;
+            for (int i = 0; i < PlayerData::kChamsSegCount; ++i)
+                p.chamsSegMidVisible[i] = whole;
+        }
+    }
+    mark("chams_part_vis");
 
     if (needSpectatorList && entityList) {
         int spectatorIdx = 0;
@@ -1385,23 +1705,28 @@ void EntityManager::update(const Process& proc) {
             spectator.mode = 0;
             spectator.name = readPlayerName(controller);
             spectator.targetName = "";
+            spectator.steamId = mem::read<std::uint64_t>(proc, controller + netvars::controller::m_steamID);
+            spectator.isBot = (spectator.steamId == 0ull);
+            spectator.teamNum = mem::read<int>(proc, pawn + netvars::pawn::m_iTeamNum);
 
-            auto observerServices = mem::read<std::uintptr_t>(
-                proc, pawn + netvars::pawn::m_pObserverServices);
+            auto observerServices = pawn_services::readObserverServices(proc, pawn);
 
             if (isLikelyPtr(observerServices)) {
-                int observerMode = mem::read<int>(
+                const int observerMode = mem::read<std::uint8_t>(
                     proc, observerServices + netvars::observer_services::m_iObserverMode);
-                spectator.mode = (observerMode >= 1 && observerMode <= 4) ? observerMode : 0;
+                spectator.mode = (observerMode >= 1 && observerMode <= 6) ? observerMode : 0;
 
                 auto observerTargetHandle = mem::read<std::uint32_t>(
                     proc, observerServices + netvars::observer_services::m_hObserverTarget);
                 const bool hasTarget = observerTargetHandle && observerTargetHandle != 0xFFFFFFFFu;
+                const bool isRoaming = (observerMode == 4);
 
-                if (hasTarget && spectator.mode != 4) {
+                if (isRoaming) {
+                    spectator.targetName = "Free roam";
+                } else if (hasTarget) {
                     spectator.watchingLocal = (observerTargetHandle == localPawnHandle);
+                    auto observerTargetPawn = resolveHandleEntity(observerTargetHandle);
                     if (!spectator.watchingLocal) {
-                        auto observerTargetPawn = resolveHandleEntity(observerTargetHandle);
                         spectator.watchingLocal = isLikelyPtr(observerTargetPawn)
                             && isLikelyPtr(localPawn)
                             && observerTargetPawn == localPawn;
@@ -1411,25 +1736,37 @@ void EntityManager::update(const Process& proc) {
                         spectator.targetName = "You";
                     } else {
                         auto targetController = findControllerByPawnHandle(observerTargetHandle);
+                        if (!isLikelyPtr(targetController) && isLikelyPtr(observerTargetPawn)) {
+                            const auto controllerHandle = pawn_services::readControllerHandle(proc, observerTargetPawn);
+                            if (controllerHandle)
+                                targetController = resolveHandleEntity(controllerHandle);
+                        }
                         spectator.targetName = isLikelyPtr(targetController)
                             ? readPlayerName(targetController)
                             : std::string("Player");
                     }
-                } else if (spectator.mode == 4) {
-                    spectator.targetName = "Free roam";
+                } else if (observerMode == 1) {
+                    spectator.targetName = "Death cam";
                 }
             }
         }
     }
 
-    // ── 4. Read grenade projectiles (entity indices 65-511, all in chunk 0) ──────
+    // â”€â”€ 4. Read grenade projectiles (entity indices 64..highest) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Read local player's foot Z now so we can use it as a floor estimate for
-    // ── 4a. Map / BSP tracking ─────────────────────────────────────────────────
-    // Scan CNetworkGameClient for the active level name once per frame.
-    // The BSP is (re)loaded only when the map changes.
-    if (m_engine2Base) {
-        auto ngcPtr = mem::read<std::uintptr_t>(
-            proc, m_engine2Base + offsets::engine2::dwNetworkGameClient);
+    // â”€â”€ 4a. Map / BSP tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Detect active map via CGlobalVars + CNetworkGameClient; load collision mesh.
+    if (m_clientBase) {
+        if (!m_engine2Base) {
+            m_engine2Base = proc.getModuleBase(OBFW("\xCE\xC5\xCC\xC2\xC5\xCE\x99\x85\xCF\xC7\xC7", 0xAB));
+            if (m_engine2Base)
+                offsets::resolveEngine2Runtime(proc, m_engine2Base);
+        }
+
+        std::uintptr_t ngcPtr = 0;
+        if (m_engine2Base)
+            ngcPtr = mem::read<std::uintptr_t>(
+                proc, m_engine2Base + offsets::engine2::dwNetworkGameClient);
 
         // One-time diagnostics so we can tell if the offset/pointer is valid.
         static bool s_scanMsg = false;
@@ -1437,30 +1774,35 @@ void EntityManager::update(const Process& proc) {
             s_scanMsg = true;
             std::cout << "[BSP] Map scan: engine2Base=0x" << std::hex << m_engine2Base
                       << "  ngcPtr=0x" << ngcPtr << std::dec
-                      << (isLikelyPtr(ngcPtr) ? "  (ptr OK)" : "  (BAD PTR)") << "\n";
+                      << (isLikelyPtr(ngcPtr) ? "  (ptr OK)" : "  (BAD PTR â€” using GlobalVars)") << "\n";
         }
 
-        if (isLikelyPtr(ngcPtr)) {
-            // Rate-limit: run full scan on first tick then every ~5 s (300 ticks).
-            static int s_scanTick = 0;
-            if (++s_scanTick % 300 == 1) {
-            // ── lambda: bare map name if buf starts with known prefix ─────────
+        // Rate-limit map scans. When BSP is loaded, rescan infrequently.
+        static int s_scanTick = 0;
+        static int s_heavyScanCooldown = 0;
+        const bool mapKnown = !m_currentMapName.empty();
+        const bool mapReady = mapKnown && m_bspWorld.isLoaded();
+        const int scanEvery = (mapReady || mapKnown) ? 3000 : 300;
+        if (++s_scanTick % scanEvery == 1) {
+            // â”€â”€ lambda: bare map name if buf starts with known prefix â”€â”€â”€â”€â”€â”€â”€â”€â”€
             auto tryMatch = [](const char* buf, int avail) -> std::string {
-                struct Pat { const char* pfx; int pfxLen; } pats[] = {
-                    { "de_",       3 }, { "cs_",       3 },
-                    { "ar_",       3 }, { "dz_",       3 },
-                    { "maps/de_",  8 }, { "maps/cs_",  8 },
-                    { "maps/ar_",  8 }, { "maps/dz_",  8 },
-                    { "maps\\de_", 9 }, { "maps\\cs_", 9 },
-                    { nullptr,     0 }
+                struct Pat { const char* pfx; int pfxLen; int nameStart; } pats[] = {
+                    { "de_",        3, 0 }, { "cs_",        3, 0 },
+                    { "ar_",        3, 0 }, { "dz_",        3, 0 },
+                    { "aim_",       4, 0 }, { "awp_",       4, 0 },
+                    { "fy_",        3, 0 }, { "1v1_",       4, 0 },
+                    { "maps/de_",   8, 5 }, { "maps/cs_",   8, 5 },
+                    { "maps/ar_",   8, 5 }, { "maps/dz_",   8, 5 },
+                    { "maps/aim_",  9, 5 }, { "maps/awp_",  9, 5 },
+                    { "maps\\de_",  9, 6 }, { "maps\\cs_",  9, 6 },
+                    { "maps\\aim_", 10, 6 },
+                    { nullptr,      0, 0 }
                 };
                 for (int p = 0; pats[p].pfx; ++p) {
                     if (avail < pats[p].pfxLen + 2) continue;
                     if (std::strncmp(buf, pats[p].pfx, pats[p].pfxLen) != 0) continue;
-                    int start = pats[p].pfxLen - 3;
-                    int slen  = 3;
-                    // Accept only lowercase letters, digits, and '_'.
-                    // This immediately rejects CamelCase protobuf field names.
+                    int start = pats[p].nameStart;
+                    int slen  = pats[p].pfxLen - start;
                     while (start + slen < avail && slen < 63) {
                         unsigned char c = (unsigned char)buf[start + slen];
                         if (!std::islower(c) && !std::isdigit(c) && c != '_') break;
@@ -1472,9 +1814,9 @@ void EntityManager::update(const Process& proc) {
             };
 
             auto readMem = [&](std::uintptr_t addr, char* buf, int sz) -> int {
-                SIZE_T rb = 0;
-                ReadProcessMemory(proc.handle(), reinterpret_cast<LPCVOID>(addr), buf, sz, &rb);
-                return (int)rb;
+                if (!mem::readRaw(proc, addr, buf, static_cast<std::size_t>(sz)))
+                    return 0;
+                return sz;
             };
 
             // CS2 allocates heap at addresses above 2^40 (e.g. 0x2800_0000_0000).
@@ -1511,19 +1853,35 @@ void EntityManager::update(const Process& proc) {
             // Retry loop: if the first candidate has no BSP, blacklist it and
             // rescan immediately so we find the real map on the same tick.
             std::string found;
+
+            // Pass 0: CGlobalVars.currentMapName â€” stable even when ngc offset drifts.
+            {
+                const auto globalVars = mem::read<std::uintptr_t>(
+                    proc, m_clientBase + offsets::client::dwGlobalVars);
+                if (isLikelyPtr(globalVars)) {
+                    const auto mapNamePtr = mem::read<std::uintptr_t>(proc, globalVars + 0x180);
+                    if (isLikelyPtr(mapNamePtr)) {
+                        const std::string raw = mem::readString(proc, mapNamePtr, 128);
+                        if (!raw.empty())
+                            found = tryMatchF(raw.c_str(), static_cast<int>(raw.size()));
+                    }
+                }
+            }
+
             for (int attempt = 0; attempt < 10 && found.empty(); ++attempt) {
 
-                // ── Pass 1: inline scan of first 8 KB of CNetworkGameClient ─
+                if (!isLikelyPtr(ngcPtr))
+                    break;
+
+                // â”€â”€ Pass 1: inline scan of first 8 KB of CNetworkGameClient â”€
                 {
                     char raw[0x2000]{};
-                    SIZE_T bread = 0;
-                    ReadProcessMemory(proc.handle(), reinterpret_cast<LPCVOID>(ngcPtr),
-                                      raw, sizeof(raw), &bread);
+                    const int bread = readMem(ngcPtr, raw, static_cast<int>(sizeof(raw)));
                     if (bread >= 0x10) {
                         for (int off = 0x08; off < (int)bread - 8 && found.empty(); ++off)
                             found = tryMatchF(raw + off, (int)bread - off);
 
-                        // ── Pass 2+3: heap pointer hops ──────────────────────
+                        // â”€â”€ Pass 2+3: heap pointer hops â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                         if (found.empty()) {
                             int p1Range = (int)bread < 0x500 ? (int)bread : 0x500;
                             for (int off = 0x08; off + 8 <= p1Range && found.empty(); off += 8) {
@@ -1550,11 +1908,13 @@ void EntityManager::update(const Process& proc) {
                     }
                 }
 
-                // ── Pass 4: VirtualQueryEx scan of all DLL .data pages ─────
-                // The map name lives in client.dll (or another DLL's) .data
-                // section, not necessarily in engine2.dll.  Scan all
-                // MEM_IMAGE PAGE_READWRITE pages in the whole process.
-                if (found.empty()) {
+                // â”€â”€ Pass 4: VirtualQueryEx scan (expensive â€” throttled) â”€â”€â”€â”€â”€â”€â”€
+                // Only when quick passes fail. Without throttling, unknown maps
+                // (e.g. aim_botz before prefix support) caused ~1 s stalls every
+                // few seconds on the entity thread.
+                if (found.empty() && !mapKnown && !mapReady && s_heavyScanCooldown <= 0
+                    && !proc.usesKernelMemory()) {
+                    s_heavyScanCooldown = 1500;
                     MEMORY_BASIC_INFORMATION mbi{};
                     auto scanAddr = reinterpret_cast<LPCVOID>(0x10000ull);
                     const std::uintptr_t kLimit = 0x7FFFFFFFFFFull;
@@ -1578,15 +1938,20 @@ void EntityManager::update(const Process& proc) {
                         std::size_t sz = mbi.RegionSize;
                         if (sz > 0x100000) sz = 0x100000;
                         vbuf.resize(sz);
-                        SIZE_T rb = 0;
-                        if (!ReadProcessMemory(proc.handle(), mbi.BaseAddress, vbuf.data(), sz, &rb) || rb < 5)
+                        if (!mem::readRaw(proc, reinterpret_cast<std::uintptr_t>(mbi.BaseAddress),
+                                          vbuf.data(), sz))
+                            continue;
+                        const std::size_t rb = sz;
+                        if (rb < 5)
                             continue;
                         for (std::size_t i = 0; i + 3 < rb && found.empty(); ++i)
                             found = tryMatchF(vbuf.data() + i, (int)(rb - i));
                     }
+                } else if (s_heavyScanCooldown > 0) {
+                    --s_heavyScanCooldown;
                 }
 
-                // ── Validate: check .bsp exists; blacklist if not ─────────────
+                // â”€â”€ Validate: check .bsp exists; blacklist if not â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 if (!found.empty() && !bspExists(found)) {
                     std::cout << "[BSP] Skipping false positive: " << found << "\n";
                     bool already = false;
@@ -1598,56 +1963,99 @@ void EntityManager::update(const Process& proc) {
 
             } // end retry loop
 
-            if (!found.empty() && found != m_currentMapName) {
-                m_currentMapName = found;
-                std::cout << "[BSP] Map detected: " << found << "\n";
+            auto loadMapCollision = [&](const std::string& mapName) -> bool {
+                if (mapName.empty())
+                    return false;
+                BspWorld::logCollisionToolkitStatus();
+                if (m_bspWorld.isLoaded()) {
+                    const std::string& cur = m_bspWorld.currentMap();
+                    if (cur == mapName || cur.find(mapName) != std::string::npos)
+                        return true;
+                    m_bspWorld.clear();
+                }
 
-                // ── Try pre-extracted .tri file first ─────────────────────
-                // Check adjacent to the overlay exe, then current directory,
-                // then a maps/ sub-directory.
+                std::cout << "[BSP] Loading collision for " << mapName << "...\n";
+
                 bool triLoaded = false;
                 {
                     auto tryTri = [&](const std::string& path) -> bool {
+                        if (path.empty())
+                            return false;
                         if (m_bspWorld.loadTri(path)) {
-                            std::cout << "[BSP] Using .tri: " << path << "\n";
+                            overlayFileLog("[BSP] Using tri cache: " + path);
                             return true;
                         }
                         return false;
                     };
 
-                    // 1. Same directory as the overlay executable
+                    const std::string mapCache = BspWorld::triCachePath(mapName);
+                    triLoaded = tryTri(mapCache);
+
                     char exePath[MAX_PATH] = {};
-                    if (GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
+                    if (!triLoaded && GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
                         std::string dir(exePath);
                         const auto sl = dir.find_last_of("\\/");
                         if (sl != std::string::npos) dir = dir.substr(0, sl + 1);
-                        triLoaded = tryTri(dir + found + ".tri")
-                                 || tryTri(dir + "maps\\" + found + ".tri");
+                        const std::string bundledTri = dir + "mapcache\\" + mapName + ".tri";
+                        if (tryTri(bundledTri)) {
+                            m_bspWorld.saveTriCache(mapName);
+                        } else {
+                            triLoaded = tryTri(dir + mapName + ".tri")
+                                     || tryTri(dir + "maps\\" + mapName + ".tri");
+                        }
                     }
-
-                    // 2. Current working directory
                     if (!triLoaded)
-                        triLoaded = tryTri(found + ".tri")
-                                 || tryTri("maps\\" + found + ".tri");
+                        triLoaded = tryTri(mapName + ".tri")
+                                 || tryTri("maps\\" + mapName + ".tri");
                 }
 
-                if (!triLoaded) {
-                    if (!m_bspWorld.load(found, m_cs2Path.c_str()))
-                        m_bspWorld.loadFromVpk(found, m_cs2Path.c_str());
+                bool ok = triLoaded;
+                if (!ok) {
+                    if (BspWorld::extractTriCache(mapName, m_cs2Path)) {
+                        const std::string mapCache = BspWorld::triCachePath(mapName);
+                        if (m_bspWorld.loadTri(mapCache)) {
+                            triLoaded = true;
+                            ok        = true;
+                            overlayFileLog("[BSP] Using tri cache: " + mapCache);
+                        } else {
+                            overlayFileLog("[BSP] tri cache present but loadTri failed: " + mapCache);
+                        }
+                    }
                 }
+
+                if (ok && !triLoaded && m_bspWorld.triCount() >= 50000)
+                    m_bspWorld.saveTriCache(mapName);
+
+                if (ok)
+                    overlayFileLog("[BSP] Collision ready for " + mapName +
+                        " (" + std::to_string(m_bspWorld.triCount()) + " tris)");
+                else
+                    overlayFileLog("[BSP] FAILED collision for " + mapName +
+                        " — need mapcache/" + mapName + ".tri or phys_extract.exe");
+                return ok;
+            };
+
+            if (!found.empty() && found != m_currentMapName) {
+                m_currentMapName = found;
+                std::cout << "[BSP] Map detected: " << found << "\n";
+                loadMapCollision(found);
+            } else if (!found.empty() && !m_bspWorld.isLoaded()) {
+                loadMapCollision(found);
+            } else if (found.empty() && !m_currentMapName.empty() && !m_bspWorld.isLoaded()) {
+                static int s_reloadTick = 0;
+                if (++s_reloadTick % 300 == 1)
+                    loadMapCollision(m_currentMapName);
             } else if (found.empty()) {
                 static int s_failTick = 0;
                 if (++s_failTick % 5 == 1)
                     std::cout << "[BSP] Scan #" << s_failTick << ": map name not found\n";
             }
 
-            } // end rate-limit block
-        }
-    }
-
+        } // end scan block (rate-limited)
+    } // end m_clientBase
     // grenades that haven't bounced yet (better than letting the arc go through ground).
     float tmpLocalFloorZ = 0.f;
-    if (needGrenadeEsp && isLikelyPtr(localPawn)) {
+    if (needGrenadeSim && isLikelyPtr(localPawn)) {
         auto sn = mem::read<std::uintptr_t>(
             proc, localPawn + netvars::pawn::m_pGameSceneNode);
         if (isLikelyPtr(sn))
@@ -1656,12 +2064,13 @@ void EntityManager::update(const Process& proc) {
     }
 
     std::array<GrenadeData, EntityManager::kMaxGrenades> tmpGrenades{};
-    bool updateGrenadesThisTick = needGrenadeEsp;
-    if (needGrenadeEsp && !m_grenadesNeedFastUpdate) {
+    // FROZEN: grenade detection + physics prediction below — do not modify unless the user
+    // explicitly asks. See .cursor/rules/grenade-prediction-frozen.mdc
+    bool updateGrenadesThisTick = needGrenadeSim;
+    if (needGrenadeSim && !m_grenadesNeedFastUpdate) {
         if (++m_grenadeSlowTick < 2) {
             updateGrenadesThisTick = false;
-            std::lock_guard<std::mutex> lg(m_mutex);
-            tmpGrenades = m_grenades;
+            tmpGrenades = m_lastPublishedGrenades;
         } else {
             m_grenadeSlowTick = 0;
         }
@@ -1707,7 +2116,7 @@ void EntityManager::update(const Process& proc) {
                 g.origin  = mem::read<Vec3>(proc, sNode  + netvars::scene_node::m_vecAbsOrigin);
                 g.velocity = mem::read<Vec3>(proc, entPtr + netvars::grenade::m_vecVelocity);
 
-                // ── Persistent bounce-floor tracking ──────────────────────────
+                // â”€â”€ Persistent bounce-floor tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 // Reset persistent state when the entity slot changes (grenade detonated).
                 auto& ps = m_grenadePersist[gi];
                 if (ps.lastEntPtr != entPtr) {
@@ -1732,7 +2141,7 @@ void EntityManager::update(const Process& proc) {
                 ps.lastGtype  = gtype;
                 ps.lastOrigin = g.origin;   // track actual position; used for PendingInferno
 
-                // Detect floor bounce by watching vel.z sign flip: negative → positive.
+                // Detect floor bounce by watching vel.z sign flip: negative â†’ positive.
                 // This works without relying on any potentially-stale game offsets.
                 constexpr float kVelThresh = 15.f;
                 bool newBounce = false;
@@ -1747,7 +2156,7 @@ void EntityManager::update(const Process& proc) {
                 // a fallback so freshly-thrown arcs bend back to the ground level.
                 float floorZ = ps.hasFloor ? ps.lastBounceZ : tmpLocalFloorZ;
 
-                // ── Fuse / timer data (type-specific) ─────────────────────────────────
+                // â”€â”€ Fuse / timer data (type-specific) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 // Use game-side m_flDetonateTime / m_flSpawnTime for accurate remaining time.
                 // Falls back to wall-clock tracking if those fields are unavailable.
                 {
@@ -1813,7 +2222,7 @@ void EntityManager::update(const Process& proc) {
                     }
                 } // end fuse/timer block
 
-                // Forward-simulate trajectory – skipped for deployed grenades (inferno, smoke cloud).
+                // Forward-simulate trajectory â€“ skipped for deployed grenades (inferno, smoke cloud).
                 if (!g.isDeployed)
                 {
                     constexpr float kMinSpeed  = 20.f;
@@ -1860,7 +2269,7 @@ void EntityManager::update(const Process& proc) {
                             pos   = p0 + (p1 - p0) * tc;
                             pos.z = floorZ;
                             // PhysicsClipVelocity(overbounce=2) on a flat floor + uniform
-                            // elasticity — matches Source engine ResolveFlyCollisionCustom.
+                            // elasticity â€” matches Source engine ResolveFlyCollisionCustom.
                             const float floorDamp = (gtype == GrenadeType::Smoke) ? 1.0f : 0.9f;
                             vel.x *= elasticity * floorDamp;
                             vel.y *= elasticity * floorDamp;
@@ -1898,8 +2307,8 @@ void EntityManager::update(const Process& proc) {
                             vel.z = newVelZ;
 
                             bool bounced      = false;
-                            bool molotovFloor = false; // molotov hit a floor → detonate
-                            bool smokeRest    = false; // smoke low-speed floor contact → deploy
+                            bool molotovFloor = false; // molotov hit a floor â†’ detonate
+                            bool smokeRest    = false; // smoke low-speed floor contact â†’ deploy
                             float remainingFrac = 0.f;
 
                             if (useBsp) {
@@ -1915,14 +2324,14 @@ void EntityManager::update(const Process& proc) {
                                     if (t < 0.002f || vDotN >= 0.f) {
                                         pos = nextPos;
                                     } else {
-                                        // Guard against outer↔inner face trap.
+                                        // Guard against outerâ†”inner face trap.
                                         const float dotLast =
                                             hitNorm.x*lastHitN.x +
                                             hitNorm.y*lastHitN.y +
                                             hitNorm.z*lastHitN.z;
                                         if ((s - lastHitStep) < 5 &&
                                             std::fabsf(dotLast) > 0.85f) {
-                                            pos = nextPos; // skip — trapped between parallel faces
+                                            pos = nextPos; // skip â€” trapped between parallel faces
                                         } else {
                                             pos = pos + (nextPos - pos) * t;
                                             if (gtype == GrenadeType::Molotov &&
@@ -2089,7 +2498,7 @@ void EntityManager::update(const Process& proc) {
     }
     mark("grenade_sim");
 
-    // ── 4a. Orphaned molotov slots ─────────────────────────────────────────
+    // â”€â”€ 4a. Orphaned molotov slots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // If a Molotov entity disappeared without another entity taking its slot
     // (e.g. the only grenade in play just exploded), the entity-reset block
     // inside the scan loop never ran. Sweep any persist slots that were NOT
@@ -2111,7 +2520,7 @@ void EntityManager::update(const Process& proc) {
             ps = {};  // clear stale slot
         }
 
-        // ── 4b. Pending infernos: post-molotov burn timer ─────────────────────────
+        // â”€â”€ 4b. Pending infernos: post-molotov burn timer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // When a Molotov entity disappears we start a 7-second burn timer at the
         // last predicted landing position (set in the entity-reset block above).
         {
@@ -2153,7 +2562,7 @@ void EntityManager::update(const Process& proc) {
             }
         }
         m_grenadesNeedFastUpdate = needFastGrenades;
-    } else if (!needGrenadeEsp) {
+    } else if (!needGrenadeSim) {
         for (auto& ps : m_grenadePersist)
             ps = {};
         for (auto& inf : m_pendingInfernos)
@@ -2161,7 +2570,6 @@ void EntityManager::update(const Process& proc) {
         m_grenadesNeedFastUpdate = true;
         m_grenadeSlowTick = 0;
     }
-
     const std::uint64_t frameNowMs = GetTickCount64();
 
     auto resolvePlantedC4 = [&]() -> std::uintptr_t {
@@ -2308,15 +2716,14 @@ void EntityManager::update(const Process& proc) {
     }
     mark("bomb");
 
-    // ── 5. Pre-throw grenade trajectory ──────────────────────────────────────
+    // â”€â”€ 5. Pre-throw grenade trajectory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // While the local player is winding up to throw a grenade (m_flThrowStrength
     // > 0), simulate the predicted arc from the eye position using the current
     // view angles and throw strength so the renderer can draw a preview line.
     PreThrowData tmpPreThrow{};
     if (needPreThrow && isLikelyPtr(localPawn)) {
             // Resolve active weapon handle via weapon services
-            auto weapSvcPtr = mem::read<std::uintptr_t>(
-                proc, localPawn + netvars::pawn::m_pWeaponServices);
+            auto weapSvcPtr = pawn_services::readWeaponServices(proc, localPawn);
             if (isLikelyPtr(weapSvcPtr)) {
                 auto weapHandle = mem::read<std::uint32_t>(
                     proc, weapSvcPtr + netvars::weapon_services::m_hActiveWeapon);
@@ -2462,7 +2869,7 @@ void EntityManager::update(const Process& proc) {
                                                 if (t < 0.002f || vDotN >= 0.f) {
                                                     pos = nextPos;
                                                 } else {
-                                                    // Guard against outer↔inner face traps
+                                                    // Guard against outerâ†”inner face traps
                                                     // (decorative mesh surfaces with two
                                                     // parallel faces the grenade oscillates
                                                     // between until speed drops to zero).
@@ -2472,7 +2879,7 @@ void EntityManager::update(const Process& proc) {
                                                         hitNorm.z*lastHitN.z;
                                                     if ((s - lastHitStep) < 5 &&
                                                         std::fabsf(dotLast) > 0.85f) {
-                                                        // Likely trapped — skip this bounce.
+                                                        // Likely trapped â€” skip this bounce.
                                                         pos = nextPos;
                                                     } else {
                                                         pos = pos + (nextPos - pos) * t;
@@ -2620,19 +3027,59 @@ void EntityManager::update(const Process& proc) {
     }
     mark("prethrow");
 
+    GameRulesData tmpGameRules{};
+    if (offsets::client::dwGameRules != 0) {
+        const std::uintptr_t gameRules = mem::read<std::uintptr_t>(
+            proc, m_clientBase + offsets::client::dwGameRules);
+        if (isLikelyPtr(gameRules)) {
+            tmpGameRules.valid = true;
+            tmpGameRules.freezePeriod = mem::read<std::uint8_t>(
+                proc, gameRules + netvars::game_rules::m_bFreezePeriod) != 0;
+            tmpGameRules.warmupPeriod = mem::read<std::uint8_t>(
+                proc, gameRules + netvars::game_rules::m_bWarmupPeriod) != 0;
+            tmpGameRules.gamePhase = mem::read<int>(proc, gameRules + netvars::game_rules::m_gamePhase);
+            tmpGameRules.totalRoundsPlayed = mem::read<int>(
+                proc, gameRules + netvars::game_rules::m_totalRoundsPlayed);
+            tmpGameRules.roundStartRoundNumber = mem::read<int>(
+                proc, gameRules + netvars::game_rules::m_iRoundStartRoundNumber);
+            tmpGameRules.roundWinStatus = mem::read<int>(
+                proc, gameRules + netvars::game_rules::m_iRoundWinStatus);
+            tmpGameRules.roundEndWinnerTeam = mem::read<int>(
+                proc, gameRules + netvars::game_rules::m_iRoundEndWinnerTeam);
+            tmpGameRules.roundStartCount = mem::read<std::uint8_t>(
+                proc, gameRules + netvars::game_rules::m_nRoundStartCount);
+            tmpGameRules.roundEndCount = mem::read<std::uint8_t>(
+                proc, gameRules + netvars::game_rules::m_nRoundEndCount);
+        }
+    }
+    mark("gamerules");
+
     m_preThrowPersist.valid = false;
 
-    // ── 6. Swap into shared state (lock held only for the fast copy) ──────────
+    // â”€â”€ 6. Publish immutable frame for render / aim readers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     {
-        std::lock_guard<std::mutex> lg(m_mutex);
-        m_players    = tmpPlayers;
-        m_spectators = tmpSpectators;
-        m_viewMatrix = tmpVm;
-        m_localPawn  = localPawn;
-        m_localTeam  = tmpLocalTeam;
-        m_grenades   = tmpGrenades;
-        m_preThrow   = tmpPreThrow;
-        m_bomb       = tmpBomb;
-    }
-}
+        const int readSlot = m_readSlot.load(std::memory_order_relaxed);
+        const int writeSlot = 1 - readSlot;
+        if (!m_frames[writeSlot])
+            m_frames[writeSlot] = std::make_shared<Snapshot>();
 
+        Snapshot& w = *m_frames[writeSlot];
+        w.players = tmpPlayers;
+        w.spectators = tmpSpectators;
+        w.grenades = tmpGrenades;
+        w.preThrow = tmpPreThrow;
+        w.bomb = tmpBomb;
+        w.gameRules = tmpGameRules;
+        w.viewMatrix = tmpVm;
+        w.localPawn = localPawn;
+        w.localTeam = tmpLocalTeam;
+        w.localPing = tmpLocalPing;
+        w.hasLocalPlayer = hasLocalPlayer;
+        w.localOrigin = tmpLocalOrigin;
+        w.localViewAngles = tmpLocalViewAngles;
+        w.currentMapName = m_currentMapName;
+        m_lastPublishedGrenades = tmpGrenades;
+        m_readSlot.store(writeSlot, std::memory_order_release);
+    }
+    m_lastUpdateTickMs.store(GetTickCount64(), std::memory_order_release);
+}

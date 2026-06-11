@@ -1,6 +1,8 @@
 #pragma once
 #include "math/vector.h"
 
+#include <cstdint>
+
 /// @file grenade.h
 /// @brief POD struct holding live data for a single thrown grenade projectile.
 
@@ -42,7 +44,7 @@ struct GrenadeData {
     bool hasStableLandPos = false;
 
     // Forward-simulated trajectory from current position+velocity (with bouncing).
-    static constexpr int kMaxPredPoints = 256;
+    static constexpr int kMaxPredPoints = 512;
     Vec3 predPoints[kMaxPredPoints]{};
     int  predCount = 0;
 };
@@ -64,9 +66,23 @@ struct PreThrowData {
     bool        isActive = false;                ///< true when player is arming a grenade
     GrenadeType type     = GrenadeType::Smoke;   ///< grenade type being held
     float       fuseTime = 0.f;                  ///< fuse duration (0 = no fuse)
-    static constexpr int kMaxPredPoints = 256;
+    static constexpr int kMaxPredPoints = 512;
     Vec3 predPoints[kMaxPredPoints]{};
     int  predCount = 0;
+};
+
+/// Authoritative round state from client C_CSGameRules (via dwGameRules).
+struct GameRulesData {
+    bool  valid                 = false;
+    bool  freezePeriod          = false;
+    bool  warmupPeriod          = false;
+    int   gamePhase             = 0;
+    int   totalRoundsPlayed     = 0;
+    int   roundStartRoundNumber = 0;
+    int   roundWinStatus        = 0;
+    int   roundEndWinnerTeam    = 0;
+    std::uint8_t roundStartCount = 0;
+    std::uint8_t roundEndCount   = 0;
 };
 
 struct BombData {

@@ -24,6 +24,9 @@ namespace netvars {
         /// m_steamID  →  uint64 Steam ID (bots are typically 0).  Offset: 1920 dec.
         constexpr std::uintptr_t m_steamID = 0x780;
 
+        /// m_iPing  →  uint32 round-trip latency in ms.  Offset: 2088 dec.
+        constexpr std::uintptr_t m_iPing = 0x828;
+
         /// m_bPawnHasDefuser  →  bool (pawn currently has defuse kit).  Offset: 2336 dec.
         constexpr std::uintptr_t m_bPawnHasDefuser = 0x920;
 
@@ -70,17 +73,32 @@ namespace netvars {
         /// m_pObserverServices  →  CPlayer_ObserverServices*.  Offset on C_BasePlayerPawn: 4600 dec.
         constexpr std::uintptr_t m_pObserverServices = 0x11F8;
 
+        /// m_hController  →  CHandle<CBasePlayerController>.  Offset on C_BasePlayerPawn: 5032 dec.
+        constexpr std::uintptr_t m_hController = 0x13A8;
+
         /// m_iShotsFired  →  int32 shots fired since last attack reset.  Offset: 7268 dec.
         constexpr std::uintptr_t m_iShotsFired = 0x1C64;
 
         /// m_pAimPunchServices  →  CCSPlayer_AimPunchServices*.  Offset: 5264 dec.
         constexpr std::uintptr_t m_pAimPunchServices = 0x1490;
 
+        /// m_aimPunchAngle  →  QAngle (pitch/yaw recoil).  Offset: 5860 dec.
+        constexpr std::uintptr_t m_aimPunchAngle = 0x16E4;
+
+        /// m_aimPunchAngleVel  →  QAngle (recoil velocity).  Offset: 5872 dec.
+        constexpr std::uintptr_t m_aimPunchAngleVel = 0x16F0;
+
+        /// m_aimPunchCache  →  CUtlVector<QAngle> (historical punch angles).  Offset: 5896 dec.
+        constexpr std::uintptr_t m_aimPunchCache = 0x1708;
+
         /// m_flFlashMaxAlpha  →  float (current flash alpha intensity).  Offset: 5116 dec.
         constexpr std::uintptr_t m_flFlashMaxAlpha = 0x13FC;
 
         /// m_flFlashDuration  →  float (remaining flash duration).  Offset: 5120 dec.
         constexpr std::uintptr_t m_flFlashDuration = 0x1400;
+
+        /// m_flMouseSensitivity  →  float (effective mouse sensitivity).  Offset: 5004 dec.
+        constexpr std::uintptr_t m_flMouseSensitivity = 0x138C;
 
         /// m_bIsScoped  →  bool (true while scoped).  Offset: 7248 dec.
         constexpr std::uintptr_t m_bIsScoped = 0x1C50;
@@ -219,6 +237,19 @@ namespace netvars {
 
         /// m_bBombPlanted  →  bool, weapon has transitioned into the planted state.  Offset: 7403 dec.
         constexpr std::uintptr_t m_bBombPlanted     = 0x1CEB;
+    }
+
+    // ── C_CSGameRules (client, via dwGameRules) ────────────────────────────────
+    namespace game_rules {
+        constexpr std::uintptr_t m_bFreezePeriod          = 0x40;
+        constexpr std::uintptr_t m_bWarmupPeriod          = 0x41;
+        constexpr std::uintptr_t m_gamePhase              = 0x84;
+        constexpr std::uintptr_t m_totalRoundsPlayed      = 0x88;
+        constexpr std::uintptr_t m_iRoundWinStatus          = 0x9AC;
+        constexpr std::uintptr_t m_iRoundEndWinnerTeam    = 0xF08;
+        constexpr std::uintptr_t m_nRoundEndCount         = 0xF44;
+        constexpr std::uintptr_t m_iRoundStartRoundNumber = 0xF48;
+        constexpr std::uintptr_t m_nRoundStartCount       = 0xF4C;
     }
 
     // ── C_BaseEntity common fields ─────────────────────────────────────────────

@@ -44,30 +44,22 @@ public:
         int count = 0;
     };
 
-    struct UtilityLineup {
-        std::string map;
-        int team = 0;
-        std::string type;
-        Vec3 throwPos{};
-        float throwYaw = 0.f;
-        Vec3 landPos{};
-        std::uint64_t createdMs = 0;
-    };
-
     struct View {
         int perfProfile = 1;
         int currentRound = 0;
         bool roundLive = false;
+        std::string mapName;
+        int storedRoundCount = 0;
+        int localDeaths = 0;
         std::vector<Cue> cues;
         std::vector<ThreatCard> threats;
         std::vector<TimelineEvent> replayEvents;
         int replayEventIndex = 0;
         int replayEventMax = 0;
+        int replayRoundIndex = 0;
+        int replayRoundMax = 0;
         std::vector<HeatPoint> deathHeat;
         std::vector<HeatPoint> failedEntryHeat;
-        std::vector<HeatPoint> utilityWasteHeat;
-        int lineupCount = 0;
-        std::vector<UtilityLineup> lineupMatches;
     };
 
     static MatchIntel& instance();
@@ -80,6 +72,11 @@ public:
 
     void setReplayEventIndex(int index);
     int replayEventIndex() const;
+
+    void setReplayRoundIndex(int index);
+    int replayRoundIndex() const;
+
+    void resetSession();
 
 private:
     MatchIntel() = default;
@@ -101,18 +98,6 @@ private:
         std::string name;
     };
 
-    struct ThrowCandidate {
-        bool active = false;
-        std::uint64_t atMs = 0;
-        std::string map;
-        int team = 0;
-        GrenadeType type = GrenadeType::Smoke;
-        Vec3 origin{};
-        float yaw = 0.f;
-        int localCellX = 0;
-        int localCellY = 0;
-    };
-
     struct RoundReplay {
         int id = 0;
         std::uint64_t startMs = 0;
@@ -126,9 +111,7 @@ private:
 
     void pushEvent(const std::string& type, const std::string& text, const Vec3& pos = {});
     void finalizeRound();
-    void loadLineupsIfNeeded();
-    void saveLineups();
-    void registerUtilityLineup(const EntityManager::Snapshot& snap, const GrenadeData& grenade, std::uint64_t tNow);
+    void resetSessionLocked();
     void updateReplayViewLocked();
 
     mutable std::mutex m_mutex;
@@ -137,6 +120,8 @@ private:
     int m_currentRound = 1;
     bool m_roundLive = false;
     std::uint64_t m_roundStartMs = 0;
+    int m_prevRoundStartCount = -1;
+    int m_prevRoundEndCount = -1;
     bool m_openingResolved = false;
     bool m_localGotOpeningKill = false;
 
@@ -154,15 +139,12 @@ private:
     std::deque<RoundReplay> m_rounds;
 
     int m_replayEventIndex = 0;
+    int m_replayRoundIndex = -1;
     std::vector<TimelineEvent> m_replayEventsView;
+
+    std::string m_lastMapName;
+    int m_localDeaths = 0;
 
     std::unordered_map<std::string, int> m_deathHeat;
     std::unordered_map<std::string, int> m_failedEntryHeat;
-    std::unordered_map<std::string, int> m_utilityWasteHeat;
-
-    std::vector<UtilityLineup> m_lineups;
-    bool m_lineupsLoaded = false;
-    bool m_lineupsDirty = false;
-
-    ThrowCandidate m_throwCandidate;
 };

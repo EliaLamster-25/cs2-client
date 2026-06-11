@@ -1,8 +1,10 @@
 #include "triggerbot.h"
+#include "game/aim_style.h"
 #include "game/entity_manager.h"
 #include "offsets/offsets.h"
 #include "offsets/netvars.h"
 #include "memory/rpm.h"
+#include "input/input_router.h"
 #include "config.h"
 #include <Windows.h>
 #include <chrono>
@@ -83,7 +85,7 @@ static AimWeaponGroup resolveActiveWeaponGroup(const Process& proc, uintptr_t cl
 }
 
 void Triggerbot::update(const Process& proc, const EntityManager& em) {
-    if (g_cfg.menuVisible)
+    if (g_cfg.menuVisible || aimCalibrationBlocksFeatures())
         return;
 
     uintptr_t clientBase = em.clientBase();
@@ -137,10 +139,5 @@ void Triggerbot::update(const Process& proc, const EntityManager& em) {
         return;
     m_lastFireTime = now;
 
-    INPUT inputs[2]{};
-    inputs[0].type       = INPUT_MOUSE;
-    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    inputs[1].type       = INPUT_MOUSE;
-    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    SendInput(2, inputs, sizeof(INPUT));
+    input_router::mouseLeftClick();
 }

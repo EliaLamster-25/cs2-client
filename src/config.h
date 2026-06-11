@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <string>
 
@@ -12,6 +13,27 @@ enum class AimWeaponGroup : int {
     Snipers,
     Other,
     Count
+};
+
+struct AimGroupCalibProfile {
+    bool  valid = false;
+    float accuracy = 0.f;
+    int   sampleCount = 0;
+    float measuredReactionMs = 0.f;
+    float measuredSmooth = 0.f;
+    float measuredFlickSpeed = 0.f;
+    float measuredJitter = 0.f;
+    float measuredOvershoot = 0.f;
+    float measuredPunchPitch = 0.f;
+    float measuredPunchYaw = 0.f;
+    float assistReactionMs = 0.f;
+    float assistSmooth = 0.f;
+    float assistFlickSpeed = 0.f;
+    float assistJitter = 0.f;
+    float assistOvershoot = 0.f;
+    float rcsX = 1.f;
+    float rcsY = 1.f;
+    float rcsSmooth = 2.5f;
 };
 
 struct AimGroupConfig {
@@ -26,9 +48,9 @@ struct AimGroupConfig {
     float aimSmooth      = 5.f;    // smoothing factor (higher = slower/smoother)
     bool  rcsEnabled     = true;   // enable recoil compensation for this weapon group
     int   rcsMode        = 1;      // 0 = Aim only, 1 = Standalone
-    float rcsX           = 1.0f;   // horizontal recoil compensation scale (0..1)
-    float rcsY           = 1.0f;   // vertical recoil compensation scale (0..1)
-    float rcsSmooth      = 6.0f;   // recoil smoothing (higher = slower)
+    float rcsX           = 1.0f;   // horizontal recoil compensation scale (0..1.25)
+    float rcsY           = 1.0f;   // vertical recoil compensation scale (0..1.25)
+    float rcsSmooth      = 2.5f;   // recoil smoothing (higher = slower; 0 = instant)
     bool  triggerEnabled = false;  // enable triggerbot for this weapon group
     int   triggerDelayMs = 10;     // delay before firing when triggerbot activates
     int   triggerKey     = 0;      // 0 = always active while enabled; else hold VK
@@ -56,7 +78,9 @@ struct OverlayConfig {
     bool skeletonOccluded    = true;
     bool chamsEnabled        = false;
     bool chamsOccluded       = true;
+    int  chamsStyle          = 0;    // 0 = bone capsules, 1 = GLB mesh, 2 = 2D silhouette
     bool nameEspEnabled      = true;
+    bool nameEspAvatarEnabled = true;
     bool armorEspEnabled     = true;
     bool armorVisibleEnabled = true;
     bool armorOccludedEnabled = true;
@@ -104,6 +128,7 @@ struct OverlayConfig {
     float ammoBarColor[4]        = { 1.0f, 0.85f, 0.24f, 0.95f };
     float dormantColor[4] = { 0.53f, 0.53f, 0.53f, 0.55f };
     float boxThickness    = 1.5f;
+    float boxWidthScale   = 1.0f;   ///< Multiplier on ESP box width (1.0 = default fit)
     float infoTextSize    = 13.f;
 
     // Anchor mapping for ESP info elements:
@@ -139,8 +164,8 @@ struct OverlayConfig {
     // Per-anchor pixel offsets applied to ESP components after anchor placement.
     // Index mapping: 0=Top, 1=Bottom, 2=Left, 3=Right,
     //                4=TopLeft, 5=TopRight, 6=BottomLeft, 7=BottomRight
-    std::array<float, 8> espAnchorOffsetX = { 0.f, 13.f, 0.f, 0.f, 0.f, 0.f, 0.f, 4.f };
-    std::array<float, 8> espAnchorOffsetY = { 0.f, 0.f, 0.f, 0.f, -5.f, 0.f, 0.f, 0.f };
+    std::array<float, 8> espAnchorOffsetX{};
+    std::array<float, 8> espAnchorOffsetY{};
 
     // Draw order for anchor-able ESP elements (lower = drawn first / closer to box)
     // Indices: 0=HpBar 1=HpText 2=Name 3=WeaponText 4=WeaponIcon
@@ -161,17 +186,48 @@ struct OverlayConfig {
     bool  aimRequireVisibility   = false;
     int   aimVisibilityMode      = 0; // 0=Performance, 1=Accuracy
     int   visibilityMode         = 1; // 0=Fast, 1=Balanced, 2=Strict
+    int   visibilityBackend      = 0; // 0=BSP (safe), 1=Game TraceShape, 2=Auto — TraceShape needs Win32 handle
+
+    /// 0 = Win32 RPM (debug/fallback), 1 = kernel driver (default, anti-detection)
+    int   memoryBackend          = 1;
+    bool  memoryAllowWin32Fallback = false;
+    /// 0 = SendInput, 1 = NtUser inject via win32u (default with kernel mode)
+    int   inputBackend           = 1;
     int   visibilityLatchFrames  = 2;
     float visMaxDistance         = 0.f;  // 0=default per mode, else max dist in units
     int   visBudgetMs            = 12;   // cumulative budget cap for BSP sweeps (3-30)
     int   visEvalBase            = 0;    // 0=auto (distance-based), 1-5=forced eval stride
 
     // ── Chams alpha ───────────────────────────────────────────────────────────
-    float chamsAlpha   = 0.18f;  // 0-1 opacity of the filled player silhouette
+    float chamsAlpha   = 0.55f;  // 0-1 opacity of the filled player silhouette
 
     // ── Grenades ───────────────────────────────────────────────────────────────
     bool  grenadeEnabled    = true;
     bool  grenadeTrajectory = true;
+    bool  grenadeHelperEnabled = true;
+    int   grenadeHelperSpotIndex = -1; // -1 = auto nearest
+    std::string grenadeLineupPackPath;
+    std::string grenadeLineupCloudId;
+    /// Sound ESP — rings at gunshot / footstep locations.
+    bool  soundEspEnabled = false;
+    bool  soundEspGunshots = true;
+    bool  soundEspFootsteps = true;
+    /// Cloud config sync (requires CRYMORE_ACCESS_TOKEN from loader).
+    bool  cloudConfigEnabled = true;
+    std::string cloudActiveConfigId;
+    /// Pixels inset from the screen edge for off-screen grenade landing indicators (higher = closer to center).
+    float grenadeOffscreenInset = 80.f;
+    /// Per-type RGBA colors — index matches GrenadeType (HE, Smoke, Flash, Molotov, Decoy).
+    float grenadeColors[5][4] = {
+        { 1.00f, 0.24f, 0.24f, 1.00f }, // HE
+        { 0.67f, 0.67f, 0.67f, 1.00f }, // Smoke
+        { 1.00f, 1.00f, 0.78f, 1.00f }, // Flash
+        { 1.00f, 0.55f, 0.00f, 1.00f }, // Molotov
+        { 0.78f, 0.78f, 0.00f, 1.00f }, // Decoy
+    };
+    float grenadePreThrowColor[4] = { 0.31f, 1.00f, 0.47f, 0.86f };
+    float grenadeDangerColor[4]   = { 1.00f, 0.32f, 0.32f, 1.00f }; // HE landing in damage radius
+    float grenadeTrajectoryAlpha  = 0.97f;
     bool  bombTimerEnabled  = true;
     bool  spectatorListEnabled = true;
     bool  radarEnabled      = true;
@@ -191,8 +247,6 @@ struct OverlayConfig {
     // 0 = Off, 1 = MSAA only, 2 = FXAA Balanced, 3 = FXAA High,
     // 4 = MSAA + FXAA Lite, 5 = MSAA + FXAA High
     int   aaMode            = 2;
-    // 0 = Balanced, 1 = Low Latency, 2 = Balanced + Prediction
-    int   latencyMode       = 0;
     // ── Triggerbot ─────────────────────────────────────────────────────
     bool  triggerbotEnabled = false;  // auto-fire when crosshair is on a living enemy
     int   triggerbotDelayMs = 10;     // ms delay before firing (0-100)
@@ -201,12 +255,49 @@ struct OverlayConfig {
     bool  aimAssistEnabled = false;   // master switch; per-weapon settings below
     int   aimAssistKey     = 0;       // global aim key (0 = always active)
     float aimSensitivity   = 3.0f;    // global CS2 sensitivity used by aim assist
+    bool  aimSensitivityManual = false; // when false, sync from game memory
     int   aimBone          = 6;       // migration fallback for old configs
     float aimFov           = 8.f;     // migration fallback for old configs
     float aimSmooth        = 5.f;     // migration fallback for old configs
-    float aimBoneOffsetZ   = 1.2f;    // migration fallback for old configs
-    float aimHeadForward   = 1.2f;    // migration fallback for old configs
+    float aimBoneOffsetZ   = 0.f;
+    float aimHeadForward   = 5.f;
     std::array<AimGroupConfig, kAimWeaponGroupCount> aimByWeaponGroup{};
+    // ── Aim humanization ─────────────────────────────────────────────────────
+    bool  aimHumanizeEnabled   = true;
+    int   aimHumanizeMode      = 0;      // 0=Auto (calibrated profile), 1=Manual sliders
+    int   aimAssistStyle       = 1;      // 0=Normal (manual smooth/FOV), 1=Support (brake & guide)
+    float aimSupportStrength   = 0.65f; // 0..1 support mode intensity
+    bool  aimDebugConsole      = false; // temporary: aim support tuning console
+    bool  aimSupportAlwaysOn   = false;  // support mode: no aim key required
+    bool  aimHumanizeUseProfile = true;   // kept in sync with mode (auto=true)
+    float aimHumanizeStrength  = 0.75f;
+    float aimCalibAssistStrength = 0.85f; // auto/calibrated assist intensity (post-calibration tweak)
+    float aimHumanizeReactionMs = 0.f;   // 0 = use calibrated/manual profile
+    float aimHumanizeJitter    = 0.f;    // 0 = use profile
+    float aimHumanizeOvershoot = 0.f;    // 0 = use profile
+    float aimHumanizeSmoothExtra = 0.f;
+    float aimHumanizeSpeedScale = 1.f;
+    bool  aimHumanizeMicroPause = true;
+    // ── Aim calibration framework ─────────────────────────────────────────────
+    bool  aimCalibrationActive = false;
+    int   aimCalibrationTargets = 20;
+    int   aimCalibrationTargetsPerGroup = 8;
+    bool  calibrationFrameworkComplete = false;
+    bool  calibrationPromptDismissed = false;
+    std::array<AimGroupCalibProfile, kAimWeaponGroupCount> aimCalibByGroup{};
+    bool  aimStyleProfileValid = false;
+    float aimStyleReactionMs   = 165.f;
+    float aimStyleSmooth       = 6.f;
+    float aimStyleOvershoot    = 1.2f;
+    float aimStyleFlickSpeed   = 680.f;
+    float aimStyleJitter       = 0.35f;
+    float aimStyleAccuracy     = 0.f;
+    float aimStyleMeasuredReactionMs = 0.f;
+    float aimStyleMeasuredSmooth     = 0.f;
+    float aimStyleMeasuredOvershoot  = 0.f;
+    float aimStyleMeasuredFlickSpeed = 0.f;
+    float aimStyleMeasuredJitter     = 0.f;
+    bool  showFpsWatermark = true;
     // ── Menu ───────────────────────────────────────────────────────────────────
     bool  menuVisible     = false;   // toggled by INSERT
     float menuPosX        = -1.f;    // normalized top-left menu X in [0,1], -1 = centered
@@ -218,12 +309,14 @@ struct OverlayConfig {
     int   processPriority      = 0;  // 0=Normal, 1=AboveNormal, 2=High
     int   entityThreadPriority = 0;  // 0=Normal, 1=AboveNormal, 2=Highest, 3=TimeCritical
     int   bgMode               = 0;  // 0=Full, 1=Reduced (slower when unfocused), 2=Minimal
-    int   performanceProfile   = 1;  // 0=LAN, 1=Balanced, 2=Stream-safe
 
 };
 
 /// Global config instance — defined in config.cpp.
 extern OverlayConfig g_cfg;
+
+/// Set from the menu to terminate the overlay immediately after cleanup.
+extern std::atomic<bool> g_requestShutdown;
 
 /// Convert a float[4] RGBA to ARGB unsigned int.
 inline unsigned int rgbaToArgb(const float c[4]) {

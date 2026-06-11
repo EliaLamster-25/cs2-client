@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>dashboard — crymore.pw</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="dash-body">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand sidebar-brand" href="/">
+        <img src="/assets/logo.png" alt="" width="32" height="32" />
+        <div class="brand-text">
+          <strong>crymore.pw</strong>
+          <span id="sidebar-username">dashboard</span>
+        </div>
+      </a>
+
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <button class="sidebar-link active" type="button" data-panel="general">General</button>
+        <button class="sidebar-link" type="button" data-panel="subscription">Subscription</button>
+        <button class="sidebar-link" type="button" data-panel="download">Download</button>
+        <button class="sidebar-link" type="button" data-panel="hardware">Hardware</button>
+        <button class="sidebar-link" type="button" data-panel="configs">Cloud configs</button>
+        <button class="sidebar-link" type="button" data-panel="lineups">Lineup packs</button>
+        <button class="sidebar-link sidebar-link-muted" type="button" id="logout-btn">Logout</button>
+      </nav>
+    </aside>
+
+    <main class="panel-main">
+      <div id="msg" class="msg hidden"></div>
+
+      <!-- General -->
+      <section class="panel active" id="panel-general">
+        <h1 class="panel-title">General</h1>
+
+        <div class="section">
+          <h2 class="section-title">Basic information</h2>
+          <div class="section-body">
+            <div class="field-row">
+              <div class="field">
+                <label for="dash-username-display">Profile name</label>
+                <input id="dash-username-display" type="text" readonly />
+              </div>
+              <div class="field">
+                <label for="dash-email">E-mail</label>
+                <input id="dash-email" type="text" readonly />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2 class="section-title">Password</h2>
+          <div class="section-body">
+            <form id="password-form">
+              <div class="field">
+                <label for="current-password">Current password</label>
+                <input id="current-password" name="current_password" type="password" required autocomplete="current-password" />
+              </div>
+              <div class="field">
+                <label for="new-password">New password</label>
+                <input id="new-password" name="new_password" type="password" required minlength="8" autocomplete="new-password" />
+              </div>
+              <button class="btn btn-primary btn-sm" type="submit">Change password</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2 class="section-title">Avatar</h2>
+          <div class="section-body">
+            <div class="avatar-section">
+              <div class="avatar-preview">
+                <img id="avatar-img" src="/assets/picture_placeholder.png" alt="avatar" />
+              </div>
+              <div class="avatar-details">
+                <p class="section-lead">Your avatar</p>
+                <p class="section-hint">PNG, JPG, or WebP · max 2 MB · shown in the loader and in-game menu</p>
+                <div class="avatar-actions">
+                  <div class="file-upload">
+                    <input id="avatar-file" type="file" accept="image/png,image/jpeg,image/webp" />
+                    <label class="btn btn-ghost btn-sm" for="avatar-file">Upload</label>
+                    <span class="file-upload-name" id="avatar-file-name">no file chosen</span>
+                  </div>
+                  <button class="btn btn-ghost btn-sm" type="button" id="avatar-remove-btn">Remove</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Subscription -->
+      <section class="panel" id="panel-subscription">
+        <h1 class="panel-title">Subscription</h1>
+
+        <div class="section">
+          <h2 class="section-title">Your plan</h2>
+          <div class="section-body">
+            <div class="stat-row"><span>Plan</span><strong id="plan">—</strong></div>
+            <div class="stat-row"><span>Status</span><span id="status-badge" class="badge">—</span></div>
+            <div class="stat-row"><span>Expires</span><span id="expires">—</span></div>
+            <div class="stat-row"><span>Remaining</span><span id="days-left">—</span></div>
+            <button class="btn btn-primary" id="renew-btn" type="button" style="margin-top:16px;">Renew free access</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Download -->
+      <section class="panel" id="panel-download">
+        <h1 class="panel-title">Download launcher</h1>
+
+        <div class="section">
+          <h2 class="section-title">Loader package</h2>
+          <div class="section-body">
+            <div class="stat-row"><span>Latest release</span><strong id="download-version">checking…</strong></div>
+            <div class="stat-row"><span>Published</span><span id="download-published">—</span></div>
+            <button class="btn btn-primary" id="download-btn" type="button">Download loader</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2 class="section-title">Requirements</h2>
+          <div class="section-body">
+            <ul class="req-list">
+              <li>Windows 10/11 x64</li>
+              <li>
+                <a href="https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-desktop-8.0.27-windows-x64-installer" target="_blank" rel="noopener">.NET 8 Desktop Runtime (x64)</a>
+              </li>
+              <li>Active subscription on this account</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- Hardware -->
+      <section class="panel" id="panel-hardware">
+        <h1 class="panel-title">Hardware resets</h1>
+
+        <div class="section">
+          <h2 class="section-title">Bound devices</h2>
+          <div class="section-body">
+            <p class="section-hint">Free tier allows one PC. Reset if you changed hardware or need to move to a new machine.</p>
+            <ul class="hwids" id="hwid-list"></ul>
+            <button class="btn btn-ghost" id="hwid-reset-btn" type="button" style="margin-top:16px;">Reset HWID</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Cloud configs -->
+      <section class="panel" id="panel-configs">
+        <h1 class="panel-title">Cloud configs</h1>
+        <div class="section">
+          <h2 class="section-title">Your saved configs</h2>
+          <div class="section-body">
+            <p class="section-hint">Sync overlay settings between sessions and devices. Upload from the in-game Config tab or here.</p>
+            <div class="field">
+              <label for="cloud-config-name">Config name</label>
+              <input id="cloud-config-name" type="text" placeholder="My competitive setup" maxlength="64" />
+            </div>
+            <div class="field">
+              <label for="cloud-config-json">Config JSON</label>
+              <textarea id="cloud-config-json" rows="10" placeholder='Paste overlay config JSON…'></textarea>
+            </div>
+            <button class="btn btn-primary btn-sm" type="button" id="cloud-config-upload-btn">Upload config</button>
+            <ul class="hwids" id="cloud-config-list" style="margin-top:16px;"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- Lineup packs -->
+      <section class="panel" id="panel-lineups">
+        <h1 class="panel-title">Lineup packs</h1>
+        <div class="section">
+          <h2 class="section-title">Browse &amp; publish</h2>
+          <div class="section-body">
+            <p class="section-hint">Share grenade lineup packs with the community. Import them from the in-game Nades tab.</p>
+            <div class="field-row">
+              <div class="field">
+                <label for="lineup-pack-title">Pack title</label>
+                <input id="lineup-pack-title" type="text" placeholder="Mirage smokes" maxlength="128" />
+              </div>
+              <div class="field">
+                <label for="lineup-pack-map">Map</label>
+                <input id="lineup-pack-map" type="text" placeholder="de_mirage" maxlength="64" />
+              </div>
+            </div>
+            <div class="field">
+              <label for="lineup-pack-json">Lineup JSON</label>
+              <textarea id="lineup-pack-json" rows="12" placeholder='{"map":"de_mirage","spots":[…]}'></textarea>
+            </div>
+            <button class="btn btn-primary btn-sm" type="button" id="lineup-pack-upload-btn">Publish pack</button>
+            <ul class="hwids" id="lineup-pack-list" style="margin-top:16px;"></ul>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+  <script>Crymore.loadDashboard();</script>
+</body>
+</html>

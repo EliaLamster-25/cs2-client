@@ -3,7 +3,6 @@
 #include "gui/font.h"
 #include <cctype>
 #include <cstring>
-#include <cstdio>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -126,18 +125,20 @@ static float animValue(uint32_t id, float target, float speed = 0.2f) {
 }
 
 static float measureTextWidth(const FontAtlas& font, const char* text, float size) {
-    if (!text || !*text) return 0.f;
+    if (!text || !*text)
+        return 0.f;
     int len = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
-    if (len <= 1) return 0.f;
+    if (len <= 1)
+        return 0.f;
 
-    std::wstring wtext(len - 1, L' ');
-    MultiByteToWideChar(CP_UTF8, 0, text, -1, &wtext[0], len);
+    std::wstring wtext(static_cast<std::size_t>(len - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, wtext.data(), len);
 
-    float scale = size / font.renderPx();
+    const float scale = size / font.renderPx();
     float width = 0.f;
     float spaceAdv = 8.f;
     if (const GlyphInfo* sg = font.glyph(L' '))
-        spaceAdv = (float)sg->advanceX;
+        spaceAdv = static_cast<float>(sg->advanceX);
 
     for (wchar_t ch : wtext) {
         if (ch == L' ') {
@@ -152,6 +153,22 @@ static float measureTextWidth(const FontAtlas& font, const char* text, float siz
     return width;
 }
 
+static float measureRenderedTextWidth(Renderer& r, const FontAtlas& font, const char* text, float fontSize) {
+    if (!text || !*text)
+        return 0.f;
+
+    int len = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+    if (len <= 1)
+        return 0.f;
+
+    std::wstring wtext(static_cast<std::size_t>(len - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, wtext.data(), len);
+
+    float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
+    r.measureTextBoundsW(font, wtext.c_str(), fontSize, minX, minY, maxX, maxY);
+    return (std::max)(0.f, maxX - minX);
+}
+
 static bool utf8ToWide(const char* text, std::wstring& out) {
     out.clear();
     if (!text || !*text)
@@ -164,6 +181,23 @@ static bool utf8ToWide(const char* text, std::wstring& out) {
     out.resize(len - 1);
     MultiByteToWideChar(CP_UTF8, 0, text, -1, out.data(), len);
     return true;
+}
+
+static float renderedTextCenterY(Renderer& r, const FontAtlas& font, float top, float boxH,
+                                 const char* text, float fontSize) {
+    if (!text || !*text)
+        return textCenterY(font, top, boxH, fontSize);
+
+    std::wstring wtext;
+    if (!utf8ToWide(text, wtext))
+        return textCenterY(font, top, boxH, fontSize);
+
+    float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
+    r.measureTextBoundsW(font, wtext.c_str(), fontSize, minX, minY, maxX, maxY);
+    const float boundsH = maxY - minY;
+    if (boundsH <= 0.f)
+        return textCenterY(font, top, boxH, fontSize);
+    return top + (boxH - boundsH) * 0.5f - minY;
 }
 
 static float textVisualCenterY(const FontAtlas& font, float top, float boxH, const wchar_t* text, float fontSize) {
@@ -342,6 +376,8 @@ uint32_t Gui::hashId(const char* id) const {
 }
 
 bool Gui::isMouseInRect(float x, float y, float w, float h) const {
+    if (m_modalInputBlocked)
+        return false;
     return m_mouseX >= x && m_mouseX < x + w && m_mouseY >= y && m_mouseY < y + h;
 }
 bool Gui::isBlockedByPopup(float x, float y, float w, float h) const {
@@ -389,6 +425,8 @@ void Gui::beginFrame(Renderer& r, const FontAtlas& f, HWND hwnd) {
     m_mouseReleased = !nowDown && m_mouseDown;
     m_mouseDown = nowDown;
 
+    m_modalInputBlocked = false;
+
     // Reset cursor for this frame
     m_cursorX = 0;
     m_cursorY = 0;
@@ -396,6 +434,8 @@ void Gui::beginFrame(Renderer& r, const FontAtlas& f, HWND hwnd) {
 }
 
 void Gui::endFrame() {
+    pollKeyboardTextInput();
+
     // If the active item was released, clear it
     if (m_mouseReleased && m_activeItem >= 0)
         m_activeItem = -1;
@@ -456,8 +496,15 @@ bool Gui::accentButton(const char* id, const char* text, float w, float h) {
     bg = lerpColor(bg, 0xFF6C6AF0, prsA * 0.8f);
 
     m_renderer->drawRoundedFilledRect(x, y, bw, h, bg, 11.f * s);
-    float tw = measureTextWidth(*m_font, text, 16.f * c);
-    m_renderer->drawText(*m_font, x + (bw - tw) * 0.5f, textControlCenterY(*m_font, y, h, text, 16.f * c), text, 0xFFFFFFFF, 16.f * c);
+    const float fontSize = 16.f * c;
+    const float tw = m_renderer
+        ? measureRenderedTextWidth(*m_renderer, *m_font, text, fontSize)
+        : measureTextWidth(*m_font, text, fontSize);
+    const float tx = x + (bw - tw) * 0.5f;
+    const float ty = m_renderer
+        ? renderedTextCenterY(*m_renderer, *m_font, y, h, text, fontSize)
+        : textVisualCenterY(*m_font, y, h, text, fontSize);
+    m_renderer->drawText(*m_font, tx, ty, text, 0xFFFFFFFF, fontSize);
 
     if (hovered && m_mouseClicked) m_activeItem = (int)idh;
     bool clicked = (m_activeItem == (int)idh && m_mouseReleased && hovered);
@@ -465,6 +512,231 @@ bool Gui::accentButton(const char* id, const char* text, float w, float h) {
 
     m_cursorY += h + Theme::ITEM_SPACING * s;
     return clicked;
+}
+
+bool Gui::textField(const char* id, char* buf, std::size_t bufSize, float h, bool password) {
+    if (!buf || bufSize == 0)
+        return false;
+
+    const uint32_t idh = hashId(id);
+    const float s = m_scale;
+    const float c = m_contentScale;
+    const float x = m_cursorX;
+    const float y = m_cursorY;
+    const float w = m_itemWidth;
+    h = (std::max)(h, 38.f) * s;
+
+    const bool hovered = !isBlockedByPopup(x, y, w, h) && isMouseInRect(x, y, w, h);
+    const bool focused = (m_activeTextFieldId == idh);
+    const float hovA = animValue(idh ^ 0x7E57u, (hovered || focused) ? 1.f : 0.f, 0.22f);
+
+    unsigned int bg = lerpColor(0xFF0D0E14, 0xFF12141E, hovA);
+    m_renderer->drawRoundedFilledRect(x, y, w, h, bg, 10.f * s);
+    m_renderer->drawRoundedRect(x, y, w, h,
+        focused ? Theme::ACCENT : 0xFF1D1F2D, 10.f * s, (std::max)(1.f, s));
+
+    if (hovered && m_mouseClicked) {
+        m_activeTextFieldId = idh;
+        m_activeTextFieldBuf = buf;
+        m_activeTextFieldSize = bufSize;
+    }
+
+    const float padX = 14.f * s;
+    const float fontSize = 15.f * c;
+    const float textY = textControlCenterY(*m_font, y, h, "Ag", fontSize);
+    std::string display = buf;
+    if (password && !display.empty())
+        display.assign(display.size(), '*');
+
+    const unsigned int textCol = display.empty() ? Theme::TEXT_MUTED : Theme::TEXT;
+    if (!display.empty())
+        m_renderer->drawText(*m_font, x + padX, textY, display.c_str(), textCol, fontSize);
+
+    if (focused) {
+        m_textCaretBlink += g_animFrameDt;
+        if (fmodf(m_textCaretBlink, 1.f) < 0.55f) {
+            const float tw = (!display.empty() && m_renderer)
+                ? measureRenderedTextWidth(*m_renderer, *m_font, display.c_str(), fontSize)
+                : 0.f;
+            const float caretX = x + padX + tw + 1.f;
+            m_renderer->drawFilledRect(caretX, y + 10.f * s, (std::max)(1.f, s), h - 20.f * s, Theme::ACCENT);
+        }
+    }
+
+    m_cursorY += h + Theme::ITEM_SPACING * s;
+    return focused;
+}
+
+static void sanitizeAsciiTokenInPlace(char* buf, std::size_t bufSize) {
+    if (!buf || bufSize == 0)
+        return;
+
+    std::size_t w = 0;
+    for (std::size_t r = 0; buf[r] != '\0' && r + 1 < bufSize; ++r) {
+        const unsigned char c = static_cast<unsigned char>(buf[r]);
+        if (std::isspace(c) != 0)
+            continue;
+        if (c < 0x21 || c > 0x7E)
+            continue;
+        buf[w++] = static_cast<char>(c);
+    }
+    buf[w] = '\0';
+}
+
+void Gui::pasteClipboardText() {
+    if (!m_activeTextFieldBuf || m_activeTextFieldSize == 0)
+        return;
+    if (!OpenClipboard(m_window))
+        return;
+
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    if (data) {
+        const wchar_t* wtext = static_cast<const wchar_t*>(GlobalLock(data));
+        if (wtext) {
+            std::string chunk;
+            chunk.reserve(128);
+            for (const wchar_t* p = wtext; *p; ++p) {
+                if (*p == L'\r' || *p == L'\n' || *p == L'\t' || *p == L' ')
+                    continue;
+                if (*p == 0xFEFF || *p == 0x200B || *p == 0x200C || *p == 0x200D || *p == 0x2060)
+                    continue;
+
+                char utf8[8]{};
+                const int n = WideCharToMultiByte(CP_UTF8, 0, p, 1, utf8, 8, nullptr, nullptr);
+                if (n <= 0)
+                    continue;
+                chunk.append(utf8, static_cast<std::size_t>(n));
+            }
+            GlobalUnlock(data);
+
+            const std::size_t used = std::strlen(m_activeTextFieldBuf);
+            const std::size_t room = m_activeTextFieldSize > 0 ? m_activeTextFieldSize - 1 : 0;
+            const std::size_t copyLen = (std::min)(chunk.size(), room > used ? room - used : 0);
+            if (copyLen > 0) {
+                std::memcpy(m_activeTextFieldBuf + used, chunk.data(), copyLen);
+                m_activeTextFieldBuf[used + copyLen] = '\0';
+            }
+            sanitizeAsciiTokenInPlace(m_activeTextFieldBuf, m_activeTextFieldSize);
+        }
+    }
+    CloseClipboard();
+}
+
+void Gui::pollKeyboardTextInput() {
+    if (!m_activeTextFieldBuf || m_activeTextFieldSize == 0)
+        return;
+
+    bool nowDown[256]{};
+    for (int vk = 0; vk < 256; ++vk)
+        nowDown[vk] = (GetAsyncKeyState(vk) & 0x8000) != 0;
+
+    auto keyEdge = [&](int vk) -> bool {
+        const std::size_t idx = static_cast<std::size_t>(vk & 0xFF);
+        return nowDown[idx] && !m_keyPrev[idx];
+    };
+
+    if ((nowDown[VK_CONTROL] || nowDown[VK_LCONTROL] || nowDown[VK_RCONTROL]) && keyEdge('V')) {
+        for (int vk = 0; vk < 256; ++vk)
+            m_keyPrev[vk] = nowDown[vk];
+        pasteClipboardText();
+        return;
+    }
+
+    if (keyEdge(VK_BACK)) {
+        onKeyDown(VK_BACK);
+        for (int vk = 0; vk < 256; ++vk)
+            m_keyPrev[vk] = nowDown[vk];
+        return;
+    }
+    if (keyEdge(VK_ESCAPE)) {
+        onKeyDown(VK_ESCAPE);
+        for (int vk = 0; vk < 256; ++vk)
+            m_keyPrev[vk] = nowDown[vk];
+        return;
+    }
+    if (keyEdge(VK_RETURN)) {
+        onKeyDown(VK_RETURN);
+        for (int vk = 0; vk < 256; ++vk)
+            m_keyPrev[vk] = nowDown[vk];
+        return;
+    }
+
+    if (nowDown[VK_CONTROL] || nowDown[VK_LCONTROL] || nowDown[VK_RCONTROL]
+        || nowDown[VK_MENU] || nowDown[VK_LMENU] || nowDown[VK_RMENU]
+        || nowDown[VK_LWIN] || nowDown[VK_RWIN]) {
+        for (int vk = 0; vk < 256; ++vk)
+            m_keyPrev[vk] = nowDown[vk];
+        return;
+    }
+
+    BYTE keyboardState[256]{};
+    if (GetKeyboardState(keyboardState)) {
+        const HKL layout = GetKeyboardLayout(0);
+        for (int vk = 1; vk < 256; ++vk) {
+            if (!keyEdge(vk))
+                continue;
+            if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT
+                || vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL
+                || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU
+                || vk == VK_TAB || vk == VK_CAPITAL)
+                continue;
+
+            const UINT scan = MapVirtualKey(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
+            if (scan == 0)
+                continue;
+
+            wchar_t chars[4]{};
+            const int count = ToUnicodeEx(static_cast<UINT>(vk), scan, keyboardState, chars, 4, 0, layout);
+            if (count == 1 && chars[0] >= 32 && chars[0] != 127)
+                onChar(chars[0]);
+        }
+    }
+
+    for (int vk = 0; vk < 256; ++vk)
+        m_keyPrev[vk] = nowDown[vk];
+}
+
+void Gui::onChar(wchar_t ch) {
+    if (!m_activeTextFieldBuf || m_activeTextFieldSize == 0)
+        return;
+    if (ch < 32 || ch == 127)
+        return;
+
+    char utf8[8]{};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, utf8, 8, nullptr, nullptr);
+    if (n <= 0)
+        return;
+
+    const std::size_t len = std::strlen(m_activeTextFieldBuf);
+    if (len + static_cast<std::size_t>(n) >= m_activeTextFieldSize)
+        return;
+
+    std::memcpy(m_activeTextFieldBuf + len, utf8, static_cast<std::size_t>(n));
+    m_activeTextFieldBuf[len + static_cast<std::size_t>(n)] = '\0';
+}
+
+void Gui::onKeyDown(WPARAM vk) {
+    if (!m_activeTextFieldBuf || m_activeTextFieldSize == 0)
+        return;
+
+    const std::size_t len = std::strlen(m_activeTextFieldBuf);
+    if (vk == VK_BACK) {
+        if (len == 0)
+            return;
+        m_activeTextFieldBuf[len - 1] = '\0';
+        return;
+    }
+    if (vk == VK_ESCAPE) {
+        m_activeTextFieldId = 0;
+        m_activeTextFieldBuf = nullptr;
+        m_activeTextFieldSize = 0;
+        return;
+    }
+    if (vk == VK_RETURN) {
+        m_activeTextFieldId = 0;
+        m_activeTextFieldBuf = nullptr;
+        m_activeTextFieldSize = 0;
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -485,10 +757,10 @@ bool Gui::toggleCheckbox(const char* id, const char* label, bool* value, float h
     bool hovered = !isBlockedByPopup(x, y, w, h) && isMouseInRect(x, y, w, h);
 
     float hovA = animValue(idh ^ 0xC4B000u, hovered ? 1.f : 0.f, 0.2f);
-    float onA = animValue(idh ^ 0xC4B001u, *value ? 1.f : 0.f, 0.22f);
-    float pressA = animValue(idh ^ 0xC4B002u, (m_activeItem == (int)idh && m_mouseDown) ? 1.f : 0.f, 0.28f);
+    float onA = animValue(idh ^ 0xC4B001u, *value ? 1.f : 0.f, 0.32f);
+    float pressA = animValue(idh ^ 0xC4B002u, (hovered && m_mouseDown) ? 1.f : 0.f, 0.4f);
 
-    unsigned int rowBg = lerpColor(Theme::SURFACE, 0xFF181927, hovA * 0.35f + onA * 0.12f);
+    unsigned int rowBg = lerpColor(Theme::SURFACE, 0xFF181927, hovA * 0.35f + onA * 0.12f + pressA * 0.18f);
     if (hovA > 0.01f || onA > 0.01f) {
         m_renderer->drawRoundedFilledRect(
             x - 1.f * s,
@@ -505,18 +777,18 @@ bool Gui::toggleCheckbox(const char* id, const char* label, bool* value, float h
     m_renderer->drawText(*m_font, x + 16.f * s, textControlCenterY(*m_font, y, h, label, 16.f * c), label, Theme::TEXT, 16.f * c);
 
     const float box = 22.f * c;
-    const float boxDraw = box * (1.f + onA * 0.08f + pressA * 0.08f);
-    float bx = x + w - boxDraw - 16.f * s;
-    float by = y + (h - boxDraw) * 0.5f;
-    unsigned int boxBg = lerpColor(0xFF1B1D2B, Theme::ACCENT, onA);
+    float bx = x + w - box - 16.f * s;
+    float by = y + (h - box) * 0.5f;
+    unsigned int boxBg = lerpColor(lerpColor(0xFF1B1D2B, 0xFF141622, pressA * 0.25f), Theme::ACCENT, onA);
     unsigned int boxBr = lerpColor(0xFF23253A, Theme::ACCENT, onA * 0.7f);
-    m_renderer->drawFilledCircle(bx + boxDraw * 0.5f, by + boxDraw * 0.5f,
-                                 boxDraw * (0.46f + onA * 0.08f),
-                                 withAlpha(Theme::ACCENT, 0.05f + hovA * 0.04f + onA * 0.14f));
-    m_renderer->drawRoundedFilledRect(bx, by, boxDraw, boxDraw, boxBg, 5.5f * s);
-    m_renderer->drawRoundedRect(bx, by, boxDraw, boxDraw, boxBr, 5.5f * s, (std::max)(1.f, s));
+    if (onA > 0.01f || hovA > 0.01f) {
+        m_renderer->drawFilledCircle(bx + box * 0.5f, by + box * 0.5f, box * 0.46f,
+                                     withAlpha(Theme::ACCENT, 0.05f + hovA * 0.04f + onA * 0.14f));
+    }
+    m_renderer->drawRoundedFilledRect(bx, by, box, box, boxBg, 5.5f * s);
+    m_renderer->drawRoundedRect(bx, by, box, box, boxBr, 5.5f * s, (std::max)(1.f, s));
     if (onA > 0.05f)
-        drawCheckGlyph(*m_renderer, bx, by, boxDraw, withAlpha(0xFFFFFFFF, onA), 1.8f * c);
+        drawCheckGlyph(*m_renderer, bx, by, box, withAlpha(0xFFFFFFFF, onA), 1.8f * c);
 
     if (hovered && m_mouseClicked) m_activeItem = (int)idh;
     bool clicked = (m_activeItem == (int)idh && m_mouseReleased && hovered);
@@ -535,6 +807,33 @@ void Gui::drawSliderGrab(float cx, float cy, float size, unsigned int color) {
     m_renderer->drawRoundedFilledRect(cx - size * 0.5f, cy - size * 0.25f, size, size * 0.5f, color, 2.f);
 }
 
+static bool keyPressedOnce(int vk) {
+    static bool prev[256]{};
+    const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+    const bool edge = down && !prev[vk];
+    prev[vk] = down;
+    return edge;
+}
+
+static void appendSliderEditChar(char* buf, std::size_t cap, char ch) {
+    const std::size_t len = std::strlen(buf);
+    if (len + 1 >= cap)
+        return;
+    buf[len] = ch;
+    buf[len + 1] = '\0';
+}
+
+static bool parseSliderEditValue(const char* text, float& out) {
+    if (!text || !*text)
+        return false;
+    char* end = nullptr;
+    const float v = std::strtof(text, &end);
+    if (end == text || !std::isfinite(v))
+        return false;
+    out = v;
+    return true;
+}
+
 bool Gui::sliderFloat(const char* id, float* value, float min, float max, const char* fmt) {
     return sliderFloatValue(id, id, value, min, max, fmt, 38.f);
 }
@@ -542,32 +841,51 @@ bool Gui::sliderFloat(const char* id, float* value, float min, float max, const 
 bool Gui::sliderFloatValue(const char* id, const char* label, float* value,
                            float min, float max, const char* fmt, float h) {
     uint32_t idh = hashId(id);
+    const int editId = static_cast<int>(idh);
     const float s = m_scale;
     const float c = m_contentScale;
     float x = m_cursorX, y = m_cursorY;
     float w = m_itemWidth;
     h = (std::max)(h, 72.f) * s;
-    bool hovered = !isBlockedByPopup(x, y, w, h) && isMouseInRect(x, y, w, h);
-    float hovA = animValue(idh ^ 0x51D300u, hovered ? 1.f : 0.f, 0.2f);
-    bool active = (m_activeItem == (int)idh && m_mouseDown);
-    float activeA = animValue(idh ^ 0x51D302u, active ? 1.f : 0.f, 0.24f);
+
+    const bool blockedByOtherEdit = m_sliderEditActive && m_sliderEditId != editId;
+
+    bool hovered = !blockedByOtherEdit && !isBlockedByPopup(x, y, w, h) && isMouseInRect(x, y, w, h);
+    const float hovA = hovered ? 1.f : 0.f;
+    bool active = !blockedByOtherEdit && (m_activeItem == (int)idh && m_mouseDown && !m_sliderEditActive);
+    const float activeA = active ? 1.f : 0.f;
 
     m_renderer->drawRoundedFilledRect(x, y, w, h, lerpColor(Theme::SURFACE, 0xFF171928, hovA * 0.32f + activeA * 0.14f), 12.f * s);
     m_renderer->drawRoundedRect(x, y, w, h, 0xFF1D1F2D, 12.f * s, (std::max)(1.f, s));
 
+    const unsigned int labelCol = blockedByOtherEdit ? Theme::TEXT_MUTED : Theme::TEXT;
+    const unsigned int valueCol = blockedByOtherEdit ? Theme::TEXT_MUTED : Theme::ACCENT;
+
     float labelX = x + 16.f * s;
     float labelY = y + 16.f * s;
-    m_renderer->drawText(*m_font, labelX, labelY, label, Theme::TEXT, 16.f * c);
+    m_renderer->drawText(*m_font, labelX, labelY, label, labelCol, 16.f * c);
 
+    const bool editing = m_sliderEditActive && m_sliderEditId == editId;
     char buf[64];
-    snprintf(buf, sizeof(buf), fmt, *value);
+    if (editing) {
+        std::snprintf(buf, sizeof(buf), "%s", m_sliderEditBuf);
+    } else {
+        snprintf(buf, sizeof(buf), fmt, *value);
+    }
+
     float valueTextW = measureTextWidth(*m_font, buf, 15.f * c);
     float valueBoxW = (std::max)(38.f * s, valueTextW + 14.f * s);
     float valueBoxH = 26.f * c;
     float vx = x + w - valueBoxW - 14.f * s;
     float vy = y + 13.f * s;
-    m_renderer->drawRoundedFilledRect(vx, vy, valueBoxW, valueBoxH, 0xFF21233A, 7.f * s);
-    m_renderer->drawText(*m_font, textVisualCenterX(*m_font, vx, valueBoxW, buf, 15.f * c), textCompactCenterY(*m_font, vy, valueBoxH, buf, 15.f * c), buf, Theme::ACCENT, 15.f * c);
+    const bool valueHovered = isMouseInRect(vx, vy, valueBoxW, valueBoxH);
+
+    unsigned int valueBg = editing ? 0xFF2A2548 : (valueHovered ? 0xFF2A2D45 : 0xFF21233A);
+    unsigned int valueBorder = editing ? Theme::ACCENT : 0xFF21233A;
+    m_renderer->drawRoundedFilledRect(vx, vy, valueBoxW, valueBoxH, valueBg, 7.f * s);
+    if (editing || valueHovered)
+        m_renderer->drawRoundedRect(vx, vy, valueBoxW, valueBoxH, valueBorder, 7.f * s, (std::max)(1.f, s));
+    m_renderer->drawText(*m_font, textVisualCenterX(*m_font, vx, valueBoxW, buf, 15.f * c), textCompactCenterY(*m_font, vy, valueBoxH, buf, 15.f * c), buf, valueCol, 15.f * c);
 
     float tx = x + 16.f * s;
     float tw = w - 32.f * s;
@@ -578,8 +896,8 @@ bool Gui::sliderFloatValue(const char* id, const char* label, float* value,
     float targetT = (*value - min) / (max - min);
     if (targetT < 0.f) targetT = 0.f;
     if (targetT > 1.f) targetT = 1.f;
-    float t = animValue(idh ^ 0x51D301u, targetT, active ? 0.35f : 0.18f);
-    m_renderer->drawRoundedFilledRect(tx, ty, tw * t, th, Theme::ACCENT, 2.f * s);
+    const float t = targetT;
+    m_renderer->drawRoundedFilledRect(tx, ty, tw * t, th, blockedByOtherEdit ? Theme::TEXT_MUTED : Theme::ACCENT, 2.f * s);
 
     float gx = tx + tw * t;
     float gy = ty + th * 0.5f;
@@ -588,16 +906,64 @@ bool Gui::sliderFloatValue(const char* id, const char* label, float* value,
     m_renderer->drawCircle(gx, gy, thumbR, Theme::ACCENT, (std::max)(1.f, s));
     m_renderer->drawFilledCircle(gx, gy, 2.1f * c, Theme::ACCENT);
 
-    if (hovered && m_mouseClicked) m_activeItem = (int)idh;
-    if (m_activeItem == (int)idh && m_mouseDown) {
-        float nt = (m_mouseX - tx) / tw;
-        if (nt < 0.f) nt = 0.f;
-        if (nt > 1.f) nt = 1.f;
-        *value = min + nt * (max - min);
+    bool changed = false;
+
+    if (editing) {
+        if (keyPressedOnce(VK_ESCAPE)) {
+            m_sliderEditActive = false;
+            m_sliderEditId = -1;
+            m_sliderEditValue = nullptr;
+        } else if (keyPressedOnce(VK_RETURN)) {
+            float parsed = 0.f;
+            if (parseSliderEditValue(m_sliderEditBuf, parsed)) {
+                parsed = (std::max)(min, (std::min)(max, parsed));
+                if (*value != parsed) {
+                    *value = parsed;
+                    changed = true;
+                }
+            }
+            m_sliderEditActive = false;
+            m_sliderEditId = -1;
+            m_sliderEditValue = nullptr;
+        } else {
+            if (keyPressedOnce(VK_BACK)) {
+                const std::size_t len = std::strlen(m_sliderEditBuf);
+                if (len > 0)
+                    m_sliderEditBuf[len - 1] = '\0';
+            }
+            for (int vk = '0'; vk <= '9'; ++vk) {
+                if (keyPressedOnce(vk))
+                    appendSliderEditChar(m_sliderEditBuf, sizeof(m_sliderEditBuf), (char)vk);
+            }
+            if (keyPressedOnce(VK_OEM_PERIOD) || keyPressedOnce(VK_DECIMAL))
+                appendSliderEditChar(m_sliderEditBuf, sizeof(m_sliderEditBuf), '.');
+            if (keyPressedOnce(VK_SUBTRACT) || keyPressedOnce(VK_OEM_MINUS))
+                appendSliderEditChar(m_sliderEditBuf, sizeof(m_sliderEditBuf), '-');
+        }
+    } else if (!blockedByOtherEdit) {
+        if (valueHovered && m_mouseClicked) {
+            m_sliderEditActive = true;
+            m_sliderEditId = editId;
+            m_sliderEditMin = min;
+            m_sliderEditMax = max;
+            m_sliderEditValue = value;
+            std::snprintf(m_sliderEditBuf, sizeof(m_sliderEditBuf), fmt, *value);
+            m_activeItem = -1;
+        } else {
+            if (hovered && m_mouseClicked && !valueHovered)
+                m_activeItem = (int)idh;
+            if (m_activeItem == (int)idh && m_mouseDown) {
+                float nt = (m_mouseX - tx) / tw;
+                if (nt < 0.f) nt = 0.f;
+                if (nt > 1.f) nt = 1.f;
+                *value = min + nt * (max - min);
+            }
+            changed = (m_activeItem == (int)idh && m_mouseReleased);
+            if (m_activeItem == (int)idh && m_mouseReleased)
+                m_activeItem = -1;
+        }
     }
 
-    bool changed = (m_activeItem == (int)idh && m_mouseReleased);
-    if (m_activeItem == (int)idh && m_mouseReleased) m_activeItem = -1;
     m_cursorY += h + Theme::ITEM_SPACING * s;
     return changed;
 }

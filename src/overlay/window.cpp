@@ -70,9 +70,6 @@ bool OverlayWindow::create(HINSTANCE hInstance, int width, int height) {
                               nullptr, nullptr, hInstance, nullptr);
     if (!m_hwnd) { std::cerr << "[Window] CreateWindowEx failed\n"; return false; }
 
-    // Prevent screen capture tools (Discord, OBS) from capturing the overlay.
-    SetWindowDisplayAffinity(m_hwnd, WDA_MONITOR);
-
     SetLayeredWindowAttributes(m_hwnd, RGB(0, 0, 0), BYTE(255), LWA_ALPHA);
     MARGINS margins = { -1, -1, -1, -1 };
     DwmExtendFrameIntoClientArea(m_hwnd, &margins);
@@ -96,30 +93,34 @@ void OverlayWindow::setClickThrough(bool on) {
 
 void OverlayWindow::syncWithGameWindow(HWND game) {
     if (!game || !m_hwnd) return;
-    RECT rc;
-    // DwmGetWindowAttribute with DWMWA_EXTENDED_FRAME_BOUNDS gives the true
-    // window region including the DWM shadow area; for fullscreen-windowed
-    // CS2 it matches the visible client region more accurately than GetWindowRect.
-    HRESULT hr = DwmGetWindowAttribute(game, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc));
-    if (FAILED(hr))
-        hr = GetWindowRect(game, &rc) ? S_OK : E_FAIL;
-    if (SUCCEEDED(hr)) {
-        int w = rc.right - rc.left, h = rc.bottom - rc.top;
-        if (rc.left != m_left || rc.top != m_top || w != m_width || h != m_height) {
-            SetWindowPos(
-                m_hwnd,
-                nullptr,
-                rc.left,
-                rc.top,
-                w,
-                h,
-                SWP_NOZORDER | SWP_NOACTIVATE
-            );
-            m_left = rc.left;
-            m_top = rc.top;
-            m_width = w;
-            m_height = h;
-        }
+
+    RECT clientRc{};
+    if (!GetClientRect(game, &clientRc))
+        return;
+
+    POINT clientOrigin{ 0, 0 };
+    if (!ClientToScreen(game, &clientOrigin))
+        return;
+
+    const int w = clientRc.right - clientRc.left;
+    const int h = clientRc.bottom - clientRc.top;
+    const int left = clientOrigin.x;
+    const int top = clientOrigin.y;
+
+    if (left != m_left || top != m_top || w != m_width || h != m_height) {
+        SetWindowPos(
+            m_hwnd,
+            nullptr,
+            left,
+            top,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE
+        );
+        m_left = left;
+        m_top = top;
+        m_width = w;
+        m_height = h;
     }
 }
 

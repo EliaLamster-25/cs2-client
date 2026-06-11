@@ -1,6 +1,7 @@
 #pragma once
 
 #include "math/vector.h"
+#include <array>
 #include <string>
 
 /// @file player.h
@@ -25,14 +26,20 @@ struct PlayerData {
     bool        hasDefuseKit = false;
     bool        isBot       = false;
 
+    std::uint64_t steamId   = 0;       ///< SteamID64 from controller (0 for bots).
+
     int         health      = 0;       ///< 0–100.
     int         armor       = 0;       ///< 0–100.
     int         ammoClip    = -1;      ///< Current ammo in active magazine.
     int         ammoMaxClip = -1;      ///< Max ammo in active magazine.
+    int         shotsFired  = 0;       ///< m_iShotsFired — used by sound ESP.
     int         teamNum     = 0;       ///< 2 = T,  3 = CT.
 
     std::uintptr_t pawn     = 0;       ///< CCSPlayerPawn address in the target process.
+    float       eyePitch    = 0.f;     ///< View pitch (degrees).
     float       eyeYaw      = 0.f;     ///< View yaw (degrees) — used for head forward offset.
+    bool        headFacingValid = false; ///< True when headFacingDir was resolved this frame.
+    Vec3        headFacingDir{};       ///< World-unit head forward (bone axis aligned to view).
 
     Vec3        origin{};              ///< Feet position (world-space).
     Vec3        headPos{};             ///< Approximate head (origin + viewOffset).
@@ -47,6 +54,13 @@ struct PlayerData {
     static constexpr int kBoneCount = 28;
     Vec3        bones[kBoneCount]{};
 
+    /// Per-bone line-of-sight for chams clipping (entity thread writes, render thread reads).
+    bool        chamsPartVisChecked = false;
+    std::array<bool, kBoneCount> chamsPartVisible{};
+    /// Midpoint visibility for cham segments (indexes match kChamsSegDefs in entity_manager).
+    static constexpr int kChamsSegCount = 16;
+    std::array<bool, kChamsSegCount> chamsSegMidVisible{};
+
     std::string name;                  ///< Sanitised player name.
     std::string weaponName;            ///< Active weapon designer-name label.
     std::string weaponId;              ///< Raw weapon designer name (e.g. weapon_ak47).
@@ -55,7 +69,10 @@ struct PlayerData {
 struct SpectatorData {
     bool        isValid = false;
     bool        watchingLocal = false;
+    bool        isBot = false;
+    int         teamNum = 0;
     int         mode = 0;
+    std::uint64_t steamId = 0;
     std::string name;
     std::string targetName;
 };

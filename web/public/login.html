@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>login — crymore.pw</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="/">
+        <img src="/assets/logo.png" alt="" width="40" height="40" />
+        <div class="brand-text"><strong>crymore.pw</strong><span>login</span></div>
+      </a>
+      <div class="nav-links"><a class="link" href="/register.html">register</a></div>
+    </nav>
+
+    <div class="card auth-card">
+      <h2>sign in</h2>
+      <div id="msg" class="msg hidden"></div>
+      <form id="login-form">
+        <div class="field">
+          <label for="username">username</label>
+          <input id="username" name="username" type="text" required autocomplete="username" />
+        </div>
+        <div class="field">
+          <label for="password">password</label>
+          <input id="password" name="password" type="password" required autocomplete="current-password" />
+        </div>
+        <button class="btn btn-primary" type="submit">sign in</button>
+      </form>
+    </div>
+  </div>
+  <script src="/app.js"></script>
+  <script>Crymore.loginForm(document.getElementById('login-form'), document.getElementById('msg'));</script>
+</body>
+</html>

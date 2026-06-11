@@ -1,5 +1,6 @@
 #pragma once
 #include "math/vector.h"
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -36,6 +37,20 @@ struct BspBrush {
 struct MeshTri {
     Vec3 p[3];  // vertex positions (world space)
     Vec3 n;     // outward unit normal = normalize(cross(p[1]-p[0], p[2]-p[0]))
+
+    // Precomputed world-space AABB of the three vertices.  Cached once at load
+    // so the per-sweep broad-phase reject does not recompute min/max each test.
+    float mnX = 0.f, mnY = 0.f, mnZ = 0.f;
+    float mxX = 0.f, mxY = 0.f, mxZ = 0.f;
+
+    void computeBounds() {
+        mnX = (std::min)((std::min)(p[0].x, p[1].x), p[2].x);
+        mxX = (std::max)((std::max)(p[0].x, p[1].x), p[2].x);
+        mnY = (std::min)((std::min)(p[0].y, p[1].y), p[2].y);
+        mxY = (std::max)((std::max)(p[0].y, p[1].y), p[2].y);
+        mnZ = (std::min)((std::min)(p[0].z, p[1].z), p[2].z);
+        mxZ = (std::max)((std::max)(p[0].z, p[1].z), p[2].z);
+    }
 };
 
 class BspWorld {
@@ -52,6 +67,24 @@ public:
     // Load Source-2 physics planes by parsing vmdl_c PHYS blocks inside the VPK.
     // Called when load() fails (CS2 retail maps don't embed a BSP brush lump).
     bool loadFromVpk(const std::string& mapName, const std::string& cs2Path);
+
+    /// %LOCALAPPDATA%\\crymore\\mapcache\\{map}.tri
+    static std::string triCachePath(const std::string& mapName);
+
+    /// Run bundled phys_extract.exe to build mapcache/{map}.tri (PhysExtractor pipeline).
+    static bool extractTriCache(const std::string& mapName, const std::string& cs2Path);
+
+    /// Log whether phys_extract.exe is next to the overlay host (once per session).
+    static void logCollisionToolkitStatus();
+
+    /// Write current triangle mesh to the map cache (same format as loadTri).
+    bool saveTriCache(const std::string& mapName) const;
+
+    /// Extra mesh passes after VPK load (uint32 index shapes, etc.).
+    void bakeCollisionMesh();
+
+    std::size_t triCount() const { return m_tris.size(); }
+    std::size_t brushCount() const { return m_brushes.size(); }
 
     void clear();
 
