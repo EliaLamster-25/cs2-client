@@ -27,6 +27,18 @@ std::uint64_t tickMs() {
     return GetTickCount64();
 }
 
+std::string readEnvVar(const char* name) {
+    if (!name || !*name)
+        return {};
+    char* buf = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&buf, &len, name) != 0 || !buf)
+        return {};
+    std::string val(buf);
+    free(buf);
+    return val;
+}
+
 std::string trimCopy(std::string s) {
     while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ' || s.back() == '\t'))
         s.pop_back();
@@ -329,8 +341,9 @@ void PlayerScout::ensureApiKeyLoaded() {
     }
 
     if (m_apiKey.empty()) {
-        if (const char* env = std::getenv("CRYMORE_LEETIFY_API_KEY")) {
-            const std::string key = normalizeApiKey(env);
+        const std::string envKey = readEnvVar("CRYMORE_LEETIFY_API_KEY");
+        if (!envKey.empty()) {
+            const std::string key = normalizeApiKey(envKey);
             if (!key.empty()) {
                 m_apiKey = key;
                 m_keyStatus = ApiKeyStatus::Valid;

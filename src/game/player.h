@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/cs2_bones.h"
+#include "math/bone_matrix.h"
 #include "math/vector.h"
 #include <array>
 #include <string>
@@ -17,6 +19,7 @@ struct PlayerData {
     bool        isLocalPlayer = false;
     bool        screenRelevant = false;///< Inside the current view; offscreen players can skip render-side work.
     bool        bonesValid  = false;   ///< True when bones[] contains valid world positions.
+    bool        boneMatricesValid = false; ///< True when boneMatrices[] contains live skeleton transforms.
     bool        visibilityChecked = false; ///< True when world-occlusion visibility was evaluated.
     bool        isVisible   = true;    ///< Visibility result from shared checker.
     float       visibilityConfidence = 1.f; ///< 0..1 visibility confidence from multi-point samples.
@@ -45,14 +48,12 @@ struct PlayerData {
     Vec3        headPos{};             ///< Approximate head (origin + viewOffset).
     Vec3        velocity{};            ///< Pawn velocity (units/sec), used for optional overlay prediction.
 
-    /// World-space bone positions, indices 0–27 (filled by EntityManager).
-    /// Layout: [pelvis=0, ?, spine=2, ?, chest=4, neck=5, head=6, ?,
-    ///          Lshoulder=8, Lelbow=9, ?, Lhand=11, ?,
-    ///          Rshoulder=13, Relbow=14, ?, Rhand=16,
-    ///          …, Lhip=22, Lknee=23, Lankle=24,
-    ///          Rhip=25, Rknee=26, Rankle=27]
+    Cs2Skeleton skeleton{};            ///< Full CS2 bone cache (128 bones, pos+rot) for mesh chams.
+    /// Legacy ESP slot layout (filled from skeleton via applySkeletonToPlayer).
     static constexpr int kBoneCount = 28;
     Vec3        bones[kBoneCount]{};
+    Mat3x4      boneMatrices[kBoneCount]{};
+    std::array<bool, kBoneCount> boneMatrixOk{};
 
     /// Per-bone line-of-sight for chams clipping (entity thread writes, render thread reads).
     bool        chamsPartVisChecked = false;
@@ -62,6 +63,7 @@ struct PlayerData {
     std::array<bool, kChamsSegCount> chamsSegMidVisible{};
 
     std::string name;                  ///< Sanitised player name.
+    std::string modelKey;              ///< Agent mesh key (tm_/ctm_) for per-player chams.
     std::string weaponName;            ///< Active weapon designer-name label.
     std::string weaponId;              ///< Raw weapon designer name (e.g. weapon_ak47).
 };

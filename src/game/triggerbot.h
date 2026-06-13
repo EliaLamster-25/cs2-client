@@ -14,4 +14,6 @@ public:
 
 private:
     std::chrono::steady_clock::time_point m_lastFireTime{};
+    std::chrono::steady_clock::time_point m_onTargetSince{};
+    bool m_onTarget = false;
 };

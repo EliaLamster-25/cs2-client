@@ -2,6 +2,7 @@
 #include "esp/chams_mesh.h"
 #include "game/aim_style.h"
 #include "overlay/overlay_metrics.h"
+#include <chrono>
 #include "memory/process.h"
 #include "memory/rpm.h"
 #include "offsets/offsets.h"
@@ -385,7 +386,13 @@ void EspRenderer::render(Renderer& r, const EntityManager& em, Process& proc) {
     if (renderGrenades)
         drawGrenades(r, *frame, vm);
 
-    m_soundEsp.update(*frame);
+    static auto s_soundLast = std::chrono::steady_clock::now();
+    const auto sNow = std::chrono::steady_clock::now();
+    float soundDt = std::chrono::duration<float>(sNow - s_soundLast).count();
+    s_soundLast = sNow;
+    if (soundDt <= 0.f || soundDt > 0.25f)
+        soundDt = 1.f / 128.f;
+    m_soundEsp.update(*frame, soundDt);
     if (renderSoundEsp)
         m_soundEsp.render(r, vm, m_font);
 
@@ -855,9 +862,14 @@ static void drawChamsCapsuleOutline2D(Renderer& r, const Vec2& a, const Vec2& b,
 
 static void drawChamsSilhouette2D(Renderer& r,
                                   const Vec2* bones, const bool* boneOk, float bodyH,
-                                  unsigned int fillCol, unsigned int outlineCol) {
-    if (((fillCol >> 24) & 0xFF) == 0)
+                                  unsigned int fillCol, unsigned int outlineCol,
+                                  float edgeThk, bool outlineOnly = false) {
+    if (outlineOnly) {
+        if (((outlineCol >> 24) & 0xFF) == 0)
+            return;
+    } else if (((fillCol >> 24) & 0xFF) == 0 && ((outlineCol >> 24) & 0xFF) == 0) {
         return;
+    }
 
     auto boneRadius = [&](float frac) {
         return std::clamp(bodyH * frac * 0.88f, 3.f, 24.f);
@@ -876,9 +888,11 @@ static void drawChamsSilhouette2D(Renderer& r,
     const float maxSegLenSq = maxSegLen * maxSegLen;
     const unsigned int solidFill = scaleArgbAlpha(fillCol, 0.68f);
     const unsigned int edgeCol = scaleArgbAlpha(outlineCol, 1.25f);
-    constexpr float kEdgeThk = 1.6f;
+    const float lineThk = std::clamp(edgeThk, 0.75f, 8.f);
 
     auto drawSegmentFill = [&](int a, int b, float radiusFrac) {
+        if (outlineOnly || ((fillCol >> 24) & 0xFF) == 0)
+            return;
         if (!boneOk[a] || !boneOk[b])
             return;
         const float dx = bones[b].x - bones[a].x;
@@ -888,28 +902,58 @@ static void drawChamsSilhouette2D(Renderer& r,
         drawChamsCapsule2D(r, bones[a], bones[b], boneRadius(radiusFrac), solidFill);
     };
 
-    for (const auto& seg : kSegments)
-        drawSegmentFill(seg.a, seg.b, seg.rf);
+    if (!outlineOnly) {
+        for (const auto& seg : kSegments)
+            drawSegmentFill(seg.a, seg.b, seg.rf);
 
-    if (boneOk[6]) {
-        float headR = boneRadius(0.118f);
-        if (boneOk[5]) {
-            const float neckDist = std::hypotf(bones[6].x - bones[5].x, bones[6].y - bones[5].y);
-            headR = (std::max)(headR, neckDist * 0.92f);
+        if (boneOk[6]) {
+            float headR = boneRadius(0.118f);
+            if (boneOk[5]) {
+                const float neckDist = std::hypotf(bones[6].x - bones[5].x, bones[6].y - bones[5].y);
+                headR = (std::max)(headR, neckDist * 0.92f);
+            }
+            r.drawFilledCircle(bones[6].x, bones[6].y, headR, solidFill);
         }
-        r.drawFilledCircle(bones[6].x, bones[6].y, headR, solidFill);
     }
 
-    thread_local std::vector<Vec2> boundaryPts;
-    boundaryPts.clear();
-    boundaryPts.reserve(96);
-
-    auto addPoint = [&](float x, float y) {
-        if (std::isfinite(x) && std::isfinite(y))
-            boundaryPts.push_back({ x, y });
+    auto distPointToSegment = [](Vec2 p, Vec2 a, Vec2 b) -> float {
+        const float dx = b.x - a.x;
+        const float dy = b.y - a.y;
+        const float lenSq = dx * dx + dy * dy;
+        if (lenSq < 1.f)
+            return std::hypotf(p.x - a.x, p.y - a.y);
+        const float t = std::clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq, 0.f, 1.f);
+        const float qx = a.x + t * dx;
+        const float qy = a.y + t * dy;
+        return std::hypotf(p.x - qx, p.y - qy);
     };
 
-    auto addCapsuleOutlinePts = [&](int a, int b, float radiusFrac) {
+    auto pointInsideCapsuleSeg = [&](Vec2 p, int a, int b, float radiusFrac) -> bool {
+        if (!boneOk[a] || !boneOk[b])
+            return false;
+        return distPointToSegment(p, bones[a], bones[b]) <= boneRadius(radiusFrac) + 0.75f;
+    };
+
+    auto pointInsideAnyOther = [&](Vec2 p, int skipA, int skipB) -> bool {
+        for (const auto& seg : kSegments) {
+            if (seg.a == skipA && seg.b == skipB)
+                continue;
+            if (pointInsideCapsuleSeg(p, seg.a, seg.b, seg.rf))
+                return true;
+        }
+        if (!(skipA == 6 && skipB == 6) && boneOk[6]) {
+            float headR = boneRadius(0.118f);
+            if (boneOk[5]) {
+                const float neckDist = std::hypotf(bones[6].x - bones[5].x, bones[6].y - bones[5].y);
+                headR = (std::max)(headR, neckDist * 0.92f);
+            }
+            if (std::hypotf(p.x - bones[6].x, p.y - bones[6].y) <= headR + 0.75f)
+                return true;
+        }
+        return false;
+    };
+
+    auto drawExteriorCapsuleOutline = [&](int a, int b, float radiusFrac) {
         if (!boneOk[a] || !boneOk[b])
             return;
         const float dx = bones[b].x - bones[a].x;
@@ -924,20 +968,30 @@ static void drawChamsSilhouette2D(Renderer& r,
         const float ux = dx / len;
         const float uy = dy / len;
         const float rad = boneRadius(radiusFrac);
-        constexpr int kRing = 6;
+        constexpr int kRing = 8;
+        Vec2 ring[kRing * 2]{};
+        int count = 0;
         for (int end = 0; end < 2; ++end) {
             const float px = end == 0 ? bones[a].x : bones[b].x;
             const float py = end == 0 ? bones[a].y : bones[b].y;
             for (int i = 0; i < kRing; ++i) {
                 const float ang = (static_cast<float>(i) / static_cast<float>(kRing)) * 6.2831853f;
-                addPoint(px + (std::cosf(ang) * nx + std::sinf(ang) * ux) * rad,
-                         py + (std::cosf(ang) * ny + std::sinf(ang) * uy) * rad);
+                ring[count++] = {
+                    px + (std::cosf(ang) * nx + std::sinf(ang) * ux) * rad,
+                    py + (std::cosf(ang) * ny + std::sinf(ang) * uy) * rad
+                };
             }
+        }
+        for (int i = 0; i < count; ++i) {
+            const Vec2& p0 = ring[i];
+            const Vec2& p1 = ring[(i + 1) % count];
+            if (!pointInsideAnyOther(p0, a, b) && !pointInsideAnyOther(p1, a, b))
+                r.drawLine(p0.x, p0.y, p1.x, p1.y, edgeCol, lineThk);
         }
     };
 
     for (const auto& seg : kSegments)
-        addCapsuleOutlinePts(seg.a, seg.b, seg.rf);
+        drawExteriorCapsuleOutline(seg.a, seg.b, seg.rf);
 
     if (boneOk[6]) {
         float headR = boneRadius(0.118f);
@@ -945,53 +999,39 @@ static void drawChamsSilhouette2D(Renderer& r,
             const float neckDist = std::hypotf(bones[6].x - bones[5].x, bones[6].y - bones[5].y);
             headR = (std::max)(headR, neckDist * 0.92f);
         }
-        constexpr int kHeadPts = 12;
+        constexpr int kHeadPts = 16;
+        Vec2 headRing[kHeadPts]{};
         for (int i = 0; i < kHeadPts; ++i) {
-            const float a = (static_cast<float>(i) / static_cast<float>(kHeadPts)) * 6.2831853f;
-            addPoint(bones[6].x + std::cosf(a) * headR, bones[6].y + std::sinf(a) * headR);
+            const float ang = (static_cast<float>(i) / static_cast<float>(kHeadPts)) * 6.2831853f;
+            headRing[i] = {
+                bones[6].x + std::cosf(ang) * headR,
+                bones[6].y + std::sinf(ang) * headR
+            };
+        }
+        for (int i = 0; i < kHeadPts; ++i) {
+            const Vec2& p0 = headRing[i];
+            const Vec2& p1 = headRing[(i + 1) % kHeadPts];
+            if (!pointInsideAnyOther(p0, 6, 6) && !pointInsideAnyOther(p1, 6, 6))
+                r.drawLine(p0.x, p0.y, p1.x, p1.y, edgeCol, lineThk);
         }
     }
+}
 
-    if (boundaryPts.size() < 3)
+static void drawChamsBodyOutline2D(Renderer& r,
+                                   const Vec2* bones, const bool* boneOk, float bodyH,
+                                   unsigned int outlineCol) {
+    if (((outlineCol >> 24) & 0xFF) == 0)
         return;
 
-    float centroidX = 0.f;
-    float centroidY = 0.f;
-    for (const Vec2& p : boundaryPts) {
-        centroidX += p.x;
-        centroidY += p.y;
+    const float thk = std::clamp(g_cfg.chamsOutlineThickness, 0.75f, 8.f);
+    constexpr int kGlowLayers = 3;
+    for (int layer = kGlowLayers; layer >= 1; --layer) {
+        const float glowThk = thk + static_cast<float>(layer) * 1.1f;
+        const float glowAlpha = 0.10f * static_cast<float>(layer) / static_cast<float>(kGlowLayers);
+        drawChamsSilhouette2D(r, bones, boneOk, bodyH, 0u, scaleArgbAlpha(outlineCol, glowAlpha),
+                              glowThk, true);
     }
-    centroidX /= static_cast<float>(boundaryPts.size());
-    centroidY /= static_cast<float>(boundaryPts.size());
-
-    constexpr int kDirs = 64;
-    thread_local std::vector<Vec2> outline;
-    outline.clear();
-    outline.resize(static_cast<size_t>(kDirs));
-
-    for (int i = 0; i < kDirs; ++i) {
-        const float angle = (static_cast<float>(i) / static_cast<float>(kDirs)) * 6.2831853f;
-        const float dirX = std::cosf(angle);
-        const float dirY = std::sinf(angle);
-        float bestProj = -1.f;
-        Vec2 bestPt{ centroidX, centroidY };
-        for (const Vec2& p : boundaryPts) {
-            const float dx = p.x - centroidX;
-            const float dy = p.y - centroidY;
-            const float proj = dx * dirX + dy * dirY;
-            if (proj > bestProj) {
-                bestProj = proj;
-                bestPt = p;
-            }
-        }
-        outline[static_cast<size_t>(i)] = bestPt;
-    }
-
-    for (size_t i = 0; i < outline.size(); ++i) {
-        const Vec2& a = outline[i];
-        const Vec2& b = outline[(i + 1) % outline.size()];
-        r.drawLine(a.x, a.y, b.x, b.y, edgeCol, kEdgeThk);
-    }
+    drawChamsSilhouette2D(r, bones, boneOk, bodyH, 0u, outlineCol, thk, true);
 }
 
 // ─── drawChams ──────────────────────────────────────────────────────────────────────────
@@ -1048,27 +1088,42 @@ void EspRenderer::drawChams(Renderer& r,
         boneOk[i] = projectChamsBone(vm, player.bones[i], predDelta, sw, sh, bones[i]);
 
     static ChamsMeshLibrary s_chamsMeshes;
+    s_chamsMeshes.initOnce();
 
-    if (g_cfg.chamsStyle == 1) {
-        s_chamsMeshes.initOnce();
-        if (s_chamsMeshes.ready()) {
-            if (s_chamsMeshes.drawPlayer(r, player, vm, visCol, occCol, drawVisible, drawOccluded, sw, sh, predDelta))
+    const int style = std::clamp(g_cfg.chamsStyle, 0, 3);
+    switch (style) {
+    case 0:
+        if (s_chamsMeshes.ready())
+            s_chamsMeshes.drawPlayerWireframe(r, player, vm, visCol, occCol,
+                                              drawVisible, drawOccluded, sw, sh, predDelta);
+        break;
+    case 1:
+        if (s_chamsMeshes.ready())
+            s_chamsMeshes.drawPlayerSolid(r, player, vm, visCol, occCol,
+                                          drawVisible, drawOccluded, sw, sh, predDelta);
+        break;
+    case 2: {
+        const bool playerVis = !g_cfg.visibilityCheckEnabled || !player.visibilityChecked || player.isVisible;
+        const float thk = std::clamp(g_cfg.chamsOutlineThickness, 0.75f, 8.f);
+        auto drawSilhouette = [&](unsigned int col) {
+            if (((col >> 24) & 0xFF) == 0)
                 return;
-        }
+            drawChamsSilhouette2D(r, bones, boneOk, bodyH, col, col, thk, false);
+            drawChamsBodyOutline2D(r, bones, boneOk, bodyH, col);
+        };
+        if (playerVis && drawVisible)
+            drawSilhouette(visCol);
+        else if (!playerVis && drawOccluded)
+            drawSilhouette(occCol);
+        break;
     }
-
-    if (g_cfg.chamsStyle == 2) {
-        const bool useVis = drawVisible && chamsMainVisFallback(player);
-        const bool useOcc = drawOccluded && g_cfg.visibilityCheckEnabled
-                         && player.visibilityChecked && !player.isVisible;
-        if (useOcc)
-            drawChamsSilhouette2D(r, bones, boneOk, bodyH, occCol, occCol);
-        if (useVis || (!useVis && !useOcc && drawVisible))
-            drawChamsSilhouette2D(r, bones, boneOk, bodyH, visCol, visCol);
-        return;
+    case 3:
+        drawChamsBodyStyle(r, player, bones, boneOk, bodyH, visCol, occCol,
+                           drawVisible, drawOccluded, sw, sh);
+        break;
+    default:
+        break;
     }
-
-    drawChamsBodyStyle(r, player, bones, boneOk, bodyH, visCol, occCol, drawVisible, drawOccluded, sw, sh);
 }
 
 static float measureTextNarrow(const FontAtlas* font, const char* text, float size) {

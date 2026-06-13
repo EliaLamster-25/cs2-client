@@ -45,14 +45,15 @@ struct AimGroupConfig {
     bool  hitboxArms     = false;
     bool  hitboxLegs     = false;
     float aimFov         = 8.f;    // maximum acquisition FOV in degrees
-    float aimSmooth      = 5.f;    // smoothing factor (higher = slower/smoother)
+    float aimSmooth      = 12.f;   // smoothing factor (higher = slower/smoother)
     bool  rcsEnabled     = true;   // enable recoil compensation for this weapon group
     int   rcsMode        = 1;      // 0 = Aim only, 1 = Standalone
     float rcsX           = 1.0f;   // horizontal recoil compensation scale (0..1.25)
     float rcsY           = 1.0f;   // vertical recoil compensation scale (0..1.25)
     float rcsSmooth      = 2.5f;   // recoil smoothing (higher = slower; 0 = instant)
     bool  triggerEnabled = false;  // enable triggerbot for this weapon group
-    int   triggerDelayMs = 10;     // delay before firing when triggerbot activates
+    int   triggerDelayMs = 10;     // delay before first shot when crosshair enters target
+    int   triggerShotCooldownMs = 80; // minimum ms between consecutive shots
     int   triggerKey     = 0;      // 0 = always active while enabled; else hold VK
 };
 
@@ -78,7 +79,8 @@ struct OverlayConfig {
     bool skeletonOccluded    = true;
     bool chamsEnabled        = false;
     bool chamsOccluded       = true;
-    int  chamsStyle          = 0;    // 0 = bone capsules, 1 = GLB mesh, 2 = 2D silhouette
+    int  chamsStyle          = 0;    // 0=wireframe GLB, 1=solid GLB, 2=bone silhouette, 3=capsules
+    float chamsOutlineThickness = 2.f;
     bool nameEspEnabled      = true;
     bool nameEspAvatarEnabled = true;
     bool armorEspEnabled     = true;
@@ -205,6 +207,7 @@ struct OverlayConfig {
     bool  grenadeEnabled    = true;
     bool  grenadeTrajectory = true;
     bool  grenadeHelperEnabled = true;
+    bool  grenadeHelperTestSpot = true;
     int   grenadeHelperSpotIndex = -1; // -1 = auto nearest
     std::string grenadeLineupPackPath;
     std::string grenadeLineupCloudId;
@@ -212,6 +215,13 @@ struct OverlayConfig {
     bool  soundEspEnabled = false;
     bool  soundEspGunshots = true;
     bool  soundEspFootsteps = true;
+    bool  soundEspVisibleEnabled = true;
+    bool  soundEspOccludedEnabled = true;
+    float soundEspLineThickness = 1.5f;
+    float soundEspRingExpand = 42.f;
+    float soundEspGunshotColor[4] = { 1.00f, 0.40f, 0.27f, 0.85f };
+    float soundEspFootstepColor[4] = { 0.53f, 0.67f, 1.00f, 0.75f };
+    int   soundEspMode = 0; // 0 = 2D screen rings, 1 = 3D ground rings
     /// Cloud config sync (requires CRYMORE_ACCESS_TOKEN from loader).
     bool  cloudConfigEnabled = true;
     std::string cloudActiveConfigId;
@@ -249,7 +259,8 @@ struct OverlayConfig {
     int   aaMode            = 2;
     // ── Triggerbot ─────────────────────────────────────────────────────
     bool  triggerbotEnabled = false;  // auto-fire when crosshair is on a living enemy
-    int   triggerbotDelayMs = 10;     // ms delay before firing (0-100)
+    int   triggerbotDelayMs = 10;     // ms delay before first shot when on target
+    int   triggerbotShotCooldownMs = 80; // ms between consecutive trigger shots
     int   triggerbotKey     = 0;      // 0 = always active (when enabled); else hold this VK
     // ── Aim Assist ────────────────────────────────────────────────────
     bool  aimAssistEnabled = false;   // master switch; per-weapon settings below

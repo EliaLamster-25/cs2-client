@@ -18,6 +18,7 @@ private:
     float m_rcsYawComp = 0.f;
     float m_prevPunchPitch = 0.f;
     float m_prevPunchYaw = 0.f;
+    int   m_prevShotsFired = 0;
 
     std::uintptr_t m_lockedPawn = 0;
     int   m_lockedBone = 6;
@@ -46,5 +47,6 @@ private:
     bool  m_hasGraceAim = false;
     bool  m_viewInit = false;
     float m_rcsTotalDx = 0.f;
+    float m_rcsTotalDy = 0.f;
     std::uint64_t m_lostTargetMs = 0;
 };

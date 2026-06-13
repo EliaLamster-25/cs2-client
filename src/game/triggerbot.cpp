@@ -9,11 +9,13 @@
 #include <Windows.h>
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <cstring>
 
-/// @file triggerbot.cpp
-/// @brief Fires a left-click whenever the crosshair entity is a living enemy.
+static constexpr float kPi = 3.14159265f;
+static constexpr float kRad2Deg = 180.f / kPi;
+static constexpr float kDeg2Rad = kPi / 180.f;
 
 static AimWeaponGroup classifyWeaponGroup(const char* weaponName) {
     if (!weaponName || !*weaponName)
@@ -84,13 +86,69 @@ static AimWeaponGroup resolveActiveWeaponGroup(const Process& proc, uintptr_t cl
     return classifyWeaponGroup(weaponName);
 }
 
+static Vec3 viewForward(float pitchDeg, float yawDeg) {
+    const float pitch = pitchDeg * kDeg2Rad;
+    const float yaw = yawDeg * kDeg2Rad;
+    const float cp = std::cosf(pitch);
+    return { cp * std::cosf(yaw), cp * std::sinf(yaw), -std::sinf(pitch) };
+}
+
+static float angleToPointDeg(const Vec3& eye, const Vec3& viewFwd, const Vec3& target) {
+    Vec3 toTarget = target - eye;
+    const float dist = toTarget.length();
+    if (dist < 0.001f)
+        return 0.f;
+    toTarget = toTarget * (1.f / dist);
+    const float dot = std::clamp(
+        viewFwd.x * toTarget.x + viewFwd.y * toTarget.y + viewFwd.z * toTarget.z,
+        -1.f, 1.f);
+    return std::acosf(dot) * kRad2Deg;
+}
+
+static bool crosshairAlignedOnTarget(const EntityManager& em, std::uintptr_t targetPawn,
+                                     const Process& proc, std::uintptr_t localPawn) {
+    const auto snap = em.publishedFrame();
+    if (!snap || !localPawn)
+        return false;
+
+    const PlayerData* target = nullptr;
+    for (const auto& p : snap->players) {
+        if (p.isValid && p.isAlive && p.pawn == targetPawn) {
+            target = &p;
+            break;
+        }
+    }
+    if (!target)
+        return false;
+
+    Vec3 localEye = snap->localOrigin;
+    const Vec3 viewOffset = mem::read<Vec3>(proc, localPawn + netvars::pawn::m_vecViewOffset);
+    localEye = localEye + viewOffset;
+
+    const Vec2 eyeAng = mem::read<Vec2>(proc, localPawn + netvars::pawn::m_angEyeAngles);
+    const Vec3 viewFwd = viewForward(eyeAng.x, eyeAng.y);
+
+    Vec3 aimPoint = target->headPos;
+    if (target->bonesValid)
+        aimPoint = target->bones[6];
+
+    const Vec3 toTarget = aimPoint - localEye;
+    const float dist = toTarget.length();
+    float maxAngle = 0.22f;
+    if (dist > 1200.f)
+        maxAngle = 0.42f;
+    else if (dist > 600.f)
+        maxAngle = 0.32f;
+
+    const float ang = angleToPointDeg(localEye, viewFwd, aimPoint);
+    return ang <= maxAngle;
+}
+
 void Triggerbot::update(const Process& proc, const EntityManager& em) {
     if (g_cfg.menuVisible || aimCalibrationBlocksFeatures())
         return;
 
     uintptr_t clientBase = em.clientBase();
-
-    // ── Read local player pawn ────────────────────────────────────────────────
     auto localPawn = em.localPawn();
     if (!localPawn) return;
 
@@ -106,11 +164,12 @@ void Triggerbot::update(const Process& proc, const EntityManager& em) {
     if (triggerKey != 0 && !(GetAsyncKeyState(triggerKey) & 0x8000))
         return;
 
-    // ── Entity index under the crosshair (0 = nothing) ───────────────────────
     int crosshairId = mem::read<int>(proc, localPawn + netvars::pawn::m_iIDEntIndex);
-    if (crosshairId <= 0) return;
+    if (crosshairId <= 0) {
+        m_onTarget = false;
+        return;
+    }
 
-    // ── Resolve the entity from the entity list ───────────────────────────────
     auto entityList = mem::read<std::uintptr_t>(
         proc, clientBase + offsets::client::dwEntityList);
     if (!entityList) return;
@@ -123,21 +182,38 @@ void Triggerbot::update(const Process& proc, const EntityManager& em) {
         proc, listEntry + 0x70 * (crosshairId & 0x1FF));
     if (!targetPawn) return;
 
-    // ── Verify it's a living enemy ────────────────────────────────────────────
     int targetTeam   = mem::read<int>(proc, targetPawn + netvars::pawn::m_iTeamNum);
     int targetHealth = mem::read<int>(proc, targetPawn + netvars::pawn::m_iHealth);
     int localTeam    = em.localTeam();
 
-    if (targetTeam == 0 || targetTeam == localTeam || targetHealth <= 0)
+    if (targetTeam == 0 || targetTeam == localTeam || targetHealth <= 0) {
+        m_onTarget = false;
         return;
+    }
 
-    // ── Fire ─────────────────────────────────────────────────────────────────
-    // Rate-limit trigger pulls using a wall-clock cooldown.
+    if (!crosshairAlignedOnTarget(em, targetPawn, proc, localPawn)) {
+        m_onTarget = false;
+        return;
+    }
+
     const auto now = std::chrono::steady_clock::now();
-    const int delayMs = (std::max)(0, (std::min)((aimCfg.triggerDelayMs > 0 ? aimCfg.triggerDelayMs : g_cfg.triggerbotDelayMs), 100));
-    if (now - m_lastFireTime < std::chrono::milliseconds(delayMs))
+    const int shotCooldownMs = (std::max)(0, (std::min)(
+        (aimCfg.triggerShotCooldownMs > 0 ? aimCfg.triggerShotCooldownMs : g_cfg.triggerbotShotCooldownMs),
+        500));
+    if (m_lastFireTime.time_since_epoch().count() != 0
+        && now - m_lastFireTime < std::chrono::milliseconds(shotCooldownMs))
         return;
-    m_lastFireTime = now;
 
+    if (!m_onTarget) {
+        m_onTarget = true;
+        m_onTargetSince = now;
+    }
+
+    const int delayMs = (std::max)(0, (std::min)(
+        (aimCfg.triggerDelayMs > 0 ? aimCfg.triggerDelayMs : g_cfg.triggerbotDelayMs), 100));
+    if (now - m_onTargetSince < std::chrono::milliseconds(delayMs))
+        return;
+
+    m_lastFireTime = now;
     input_router::mouseLeftClick();
 }

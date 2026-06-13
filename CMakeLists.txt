@@ -78,6 +78,8 @@ set(SOURCES
     src/overlay/renderer.cpp
     src/overlay/overlay_metrics.cpp
     src/game/entity_manager.cpp
+    src/game/cs2_bones.cpp
+    src/game/cs2_model.cpp
     src/game/triggerbot.cpp
     src/game/aim_assist.cpp
     src/debug/aim_debug.cpp
@@ -90,12 +92,12 @@ set(SOURCES
     src/esp/grenade_helper.cpp
     src/esp/sound_esp.cpp
     src/esp/chams_mesh.cpp
+    src/esp/chams_skinning.cpp
     src/cloud/cloud_api.cpp
     src/menu/menu.cpp
     src/gui/font.cpp
     src/gui/gui.cpp
     src/gui/icons.cpp
-    src/analytics/match_intel.cpp
     src/analytics/player_scout.cpp
     src/profile/user_profile.cpp
     src/bsp/bsp_world.cpp
