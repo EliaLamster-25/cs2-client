@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 
 static constexpr float kPi = 3.14159265f;
 static constexpr float kRad2Deg = 180.f / kPi;
@@ -38,11 +39,12 @@ static inline float normalizeAngle(float ang) {
 }
 
 static float effectiveAimSmooth(float slider) {
-    return std::clamp(slider + 1.f, 2.f, 31.f);
+    const float t = std::clamp(slider, 1.f, 50.f);
+    return 4.f + std::powf(t, 2.35f) * 0.42f;
 }
 
 static float supportResponseDiv(float slider) {
-    return std::clamp(slider * 0.30f + 1.f, 1.f, 8.f);
+    return std::clamp(slider * 1.1f + 4.f, 5.f, 48.f);
 }
 
 static float supportGroupSpeedScale(AimWeaponGroup group) {
@@ -113,6 +115,12 @@ static bool isLikelyPtr(std::uintptr_t p) {
 }
 
 static bool readAimPunch(const Process& proc, std::uintptr_t localPawn, Vec3& out) {
+    const Vec3 direct = mem::read<Vec3>(proc, localPawn + netvars::pawn::m_aimPunchAngle);
+    if (std::isfinite(direct.x) && std::isfinite(direct.y)) {
+        out = direct;
+        return true;
+    }
+
     const std::uintptr_t cacheBase = localPawn + netvars::pawn::m_aimPunchCache;
     const int cacheCount = mem::read<int>(proc, cacheBase);
     const std::uintptr_t cacheData = mem::read<std::uintptr_t>(proc, cacheBase + 0x8);
@@ -144,11 +152,6 @@ static bool readAimPunch(const Process& proc, std::uintptr_t localPawn, Vec3& ou
         }
     }
 
-    const Vec3 direct = mem::read<Vec3>(proc, localPawn + netvars::pawn::m_aimPunchAngle);
-    if (std::isfinite(direct.x) && std::isfinite(direct.y)) {
-        out = direct;
-        return true;
-    }
     return false;
 }
 
@@ -186,7 +189,7 @@ static Vec3 resolveHeadForwardDir(const PlayerData& player) {
     return fwd * (1.f / len);
 }
 
-static void refreshAimPlayerPositions(const Process& proc, PlayerData& player, bool refreshBones) {
+static void refreshAimPlayerPositions(const Process& proc, PlayerData& player, bool /*refreshBones*/) {
     if (!isLikelyPtr(player.pawn))
         return;
 
@@ -195,7 +198,6 @@ static void refreshAimPlayerPositions(const Process& proc, PlayerData& player, b
     player.teamNum = mem::read<int>(proc, player.pawn + netvars::pawn::m_iTeamNum);
     player.isAlive = player.health > 0;
     player.isDormant = false;
-    player.headFacingValid = false;
 
     const Vec2 eyeAng = mem::read<Vec2>(proc, player.pawn + netvars::pawn::m_angEyeAngles);
     if (std::isfinite(eyeAng.x) && std::isfinite(eyeAng.y)) {
@@ -220,71 +222,11 @@ static void refreshAimPlayerPositions(const Process& proc, PlayerData& player, b
             player.origin = oldOrigin;
     }
 
-    const Vec3 viewOffset = mem::read<Vec3>(
-        proc, player.pawn + netvars::pawn::m_vecViewOffset);
-    if (std::isfinite(viewOffset.z))
-        player.headPos = player.origin + viewOffset;
-
-    if (!isLikelyPtr(sceneNode))
-        return;
-
-    auto bonePtr = mem::read<std::uintptr_t>(
-        proc, sceneNode + netvars::skeleton::m_boneArrayPtr);
-    if (!isLikelyPtr(bonePtr))
-        bonePtr = mem::read<std::uintptr_t>(proc, sceneNode + 0x1E0);
-    if (!isLikelyPtr(bonePtr))
-        bonePtr = mem::read<std::uintptr_t>(proc, sceneNode + 0x1C8);
-    if (!isLikelyPtr(bonePtr))
-        return;
-
-    float boneMat[12]{};
-    constexpr int kHeadBone = 6;
-    constexpr std::uintptr_t kBoneStride = netvars::skeleton::kBoneStride;
-    if (mem::readArray(proc,
-            bonePtr + static_cast<std::uintptr_t>(kHeadBone) * kBoneStride,
-            boneMat, 12)) {
-        const Vec3 headBone{ boneMat[3], boneMat[7], boneMat[11] };
-        if (isBonePlausible(headBone, player.origin)) {
-            player.bones[kHeadBone] = headBone;
-            player.headPos = headBone;
-            player.bonesValid = true;
-
-            Vec3 boneAxis{ boneMat[0], boneMat[4], boneMat[8] };
-            const float axisLen = boneAxis.length();
-            if (axisLen > 0.001f) {
-                boneAxis = boneAxis * (1.f / axisLen);
-                Vec3 eyeFwd = forwardFromAngles(player.eyePitch, player.eyeYaw);
-                const float eyeLen = eyeFwd.length();
-                if (eyeLen > 0.001f) {
-                    eyeFwd = eyeFwd * (1.f / eyeLen);
-                    const float align = boneAxis.x * eyeFwd.x + boneAxis.y * eyeFwd.y + boneAxis.z * eyeFwd.z;
-                    if (std::fabs(align) >= 0.5f) {
-                        player.headFacingDir = (align < 0.f) ? boneAxis * -1.f : boneAxis;
-                    } else {
-                        player.headFacingDir = eyeFwd;
-                    }
-                } else {
-                    player.headFacingDir = boneAxis;
-                }
-                player.headFacingValid = true;
-            }
-        }
-    }
-
-    if (!refreshBones)
-        return;
-
-    constexpr int kAimBones[] = { 0, 2, 4, 8, 9, 13, 14, 23, 26 };
-    for (int boneIdx : kAimBones) {
-        if (boneIdx == kHeadBone)
-            continue;
-        if (!mem::readArray(proc,
-                bonePtr + static_cast<std::uintptr_t>(boneIdx) * kBoneStride,
-                boneMat, 12))
-            continue;
-        const Vec3 bonePos{ boneMat[3], boneMat[7], boneMat[11] };
-        if (isBonePlausible(bonePos, player.origin))
-            player.bones[boneIdx] = bonePos;
+    if (!player.bonesValid) {
+        const Vec3 viewOffset = mem::read<Vec3>(
+            proc, player.pawn + netvars::pawn::m_vecViewOffset);
+        if (std::isfinite(viewOffset.z))
+            player.headPos = player.origin + viewOffset;
     }
 }
 
@@ -337,16 +279,19 @@ static std::uint64_t nowMs() {
             std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-static float effectiveMaxFov(float maxFov, float distance) {
-    const float distScale = (std::max)(distance / 100.f, 1.f);
-    return maxFov / distScale;
+static float effectiveMaxFov(float maxFov, float /*distance*/) {
+    return maxFov;
 }
 
 static Vec3 resolveBoneAimPoint(const PlayerData& player, int boneSlot) {
     switch (boneSlot) {
     case 6: {
-        const Vec3 headFallback = player.headPos;
-        return resolveBonePoint(player, 6, headFallback);
+        if (player.skeleton.isValid()) {
+            const Vec3 head = player.skeleton.position(6);
+            if (isBonePlausible(head, player.origin))
+                return head;
+        }
+        return resolveBonePoint(player, 6, player.headPos);
     }
     case 4:
         return resolveBonePoint(player, 4, player.origin + Vec3{ 0.f, 0.f, 54.f });
@@ -557,7 +502,7 @@ void AimAssist::update(const Process& proc, const EntityManager& em, float scree
         PlayerData player = cached;
         const bool stickyLock = (player.pawn == m_lockedPawn);
         if (liveRefresh)
-            refreshAimPlayerPositions(proc, player, stickyLock);
+            refreshAimPlayerPositions(proc, player, false);
 
         if (!player.isValid || !player.isAlive || player.isLocalPlayer)
             return;
@@ -684,8 +629,11 @@ void AimAssist::update(const Process& proc, const EntityManager& em, float scree
         m_lockedAimPoint = bestAimPoint;
         if (isFiniteVec3(prevAim) && isFiniteVec3(m_lockedAimPoint)) {
             const Vec3 jump = m_lockedAimPoint - prevAim;
-            if (jump.lengthSq() > kMaxAimPointJump * kMaxAimPointJump)
-                m_lockedAimPoint = prevAim;
+            const float jumpLen = jump.length();
+            if (jumpLen > kMaxAimPointJump) {
+                const float t = kMaxAimPointJump / jumpLen;
+                m_lockedAimPoint = prevAim + jump * t;
+            }
         }
         m_lostTargetMs = 0;
     }
@@ -728,14 +676,23 @@ void AimAssist::update(const Process& proc, const EntityManager& em, float scree
                 m_smoothedAimPoint = supportAimPoint;
                 m_hasSmoothedAim = true;
             } else {
-                const float aimAlpha = std::clamp(tickScale * 0.30f, 0.12f, 0.38f);
-                m_smoothedAimPoint.x += (supportAimPoint.x - m_smoothedAimPoint.x) * aimAlpha;
-                m_smoothedAimPoint.y += (supportAimPoint.y - m_smoothedAimPoint.y) * aimAlpha;
-                m_smoothedAimPoint.z += (supportAimPoint.z - m_smoothedAimPoint.z) * aimAlpha;
+                const float pointAlpha = std::clamp(
+                    tickScale * (6.f / (std::max)(1.f, smooth)), 0.04f, 0.22f);
+                m_smoothedAimPoint.x += (supportAimPoint.x - m_smoothedAimPoint.x) * pointAlpha;
+                m_smoothedAimPoint.y += (supportAimPoint.y - m_smoothedAimPoint.y) * pointAlpha;
+                m_smoothedAimPoint.z += (supportAimPoint.z - m_smoothedAimPoint.z) * pointAlpha;
             }
+        } else if (!m_hasSmoothedAim) {
+            m_smoothedAimPoint = supportAimPoint;
+            m_hasSmoothedAim = true;
+        } else {
+            const float aimAlpha = std::clamp(tickScale * 0.30f, 0.12f, 0.38f);
+            m_smoothedAimPoint.x += (supportAimPoint.x - m_smoothedAimPoint.x) * aimAlpha;
+            m_smoothedAimPoint.y += (supportAimPoint.y - m_smoothedAimPoint.y) * aimAlpha;
+            m_smoothedAimPoint.z += (supportAimPoint.z - m_smoothedAimPoint.z) * aimAlpha;
         }
 
-        const Vec3 errSource = supportMode ? supportAimPoint : m_smoothedAimPoint;
+        const Vec3 errSource = m_smoothedAimPoint;
         const Vec3 aimAngles = calcAngle(eyePos, errSource);
         const float pitchErr = normalizeAngle(aimAngles.x - readPitch);
         const float yawErr = normalizeAngle(aimAngles.y - readYaw);
@@ -748,140 +705,54 @@ void AimAssist::update(const Process& proc, const EntityManager& em, float scree
 
         if (supportMode) {
             const float strength = std::clamp(g_cfg.aimSupportStrength, 0.f, 1.f);
-            const float responseDiv = supportResponseDiv(aimCfg.aimSmooth);
-            const float groupSpeed = supportGroupSpeedScale(activeGroup);
-            const float minBrakeErr = supportMinBrakeErr(activeGroup);
-            dbg.responseDiv = responseDiv;
-
-            float userPitch = 0.f;
-            float userYaw = 0.f;
-            if (m_viewInit) {
-                const float totalPitch = normalizeAngle(readPitch - m_prevViewPitch);
-                const float totalYaw = normalizeAngle(readYaw - m_prevViewYaw);
-                const float assistLeak = 0.38f + strength * 0.22f;
-                userPitch = totalPitch - m_lastAssistPitch * assistLeak;
-                userYaw = totalYaw - m_lastAssistYaw * assistLeak;
+            if (strength < 0.01f) {
+                dbg.action = AimDebugAction::Idle;
             } else {
-                m_viewInit = true;
-            }
-            m_prevViewPitch = readPitch;
-            m_prevViewYaw = readYaw;
+                float userPitch = 0.f;
+                float userYaw = 0.f;
+                if (m_viewInit) {
+                    const float totalPitch = normalizeAngle(readPitch - m_prevViewPitch);
+                    const float totalYaw = normalizeAngle(readYaw - m_prevViewYaw);
+                    userPitch = totalPitch - m_lastAssistPitch * 0.25f;
+                    userYaw = totalYaw - m_lastAssistYaw * 0.25f;
+                } else {
+                    m_viewInit = true;
+                }
+                m_prevViewPitch = readPitch;
+                m_prevViewYaw = readYaw;
 
-            const float userFilter = 0.55f + strength * 0.35f;
-            m_filtUserPitch += (userPitch - m_filtUserPitch) * userFilter;
-            m_filtUserYaw += (userYaw - m_filtUserYaw) * userFilter;
-            userPitch = m_filtUserPitch;
-            userYaw = m_filtUserYaw;
-            dbg.userPitch = userPitch;
-            dbg.userYaw = userYaw;
-
-            if (strength >= 0.01f) {
-                const float assistFov = (std::min)(maxFov,
-                    kSupportAssistFov * (0.92f + 0.38f * strength));
-                const float userMoveMin = kSupportUserMoveMin * (1.05f - strength * 0.45f);
                 const float userMoveMag = std::sqrtf(userPitch * userPitch + userYaw * userYaw);
-                dbg.assistFov = assistFov;
-                dbg.userMoveMin = userMoveMin;
+                const float minMove = kSupportUserMoveMin * (1.05f - strength * 0.40f);
+                dbg.userPitch = userPitch;
+                dbg.userYaw = userYaw;
                 dbg.userMoveMag = userMoveMag;
-                const float brakeScale = std::clamp(0.34f + strength * 0.48f, 0.34f, 0.82f);
+                dbg.userMoveMin = minMove;
 
-                const bool crossedTarget = m_viewInit && errMag > 0.14f
-                    && ((m_prevPitchErr * pitchErr < 0.f && std::fabs(m_prevPitchErr) > 0.04f)
-                        || (m_prevYawErr * yawErr < 0.f && std::fabs(m_prevYawErr) > 0.04f));
-                const float overshootDelta = supportOvershootDelta(errMag);
-                const bool overshot = errMag > minBrakeErr
-                    && (crossedTarget
-                        || (errMag > 0.30f
-                            && m_prevErrMag < 999.f && errMag > m_prevErrMag + overshootDelta
-                            && m_prevErrMag > kAimDeadzoneDeg
-                            && userMoveMag > userMoveMin * 0.45f));
-                dbg.crossedTarget = crossedTarget;
-                dbg.overshot = overshot;
+                if (userMoveMag >= minMove && errMag <= maxFov) {
+                    const float smoothVal = effectiveAimSmooth(aimCfg.aimSmooth);
+                    float stepFrac = std::clamp(tickScale * (2.5f / smoothVal), 0.006f, 0.35f);
+                    stepFrac *= strength;
 
-                const bool inZone = errMag <= assistFov;
-                const bool nearTarget = errMag >= kSoftSettleMinErr && errMag <= kSoftSettleMaxErr;
-                const bool canSettle = inZone && nearTarget
-                    && (shooting || userMoveMag <= userMoveMin * 2.5f);
-                const bool userActive = userMoveMag > userMoveMin;
-                const bool canAssist = inZone && userActive && errMag > kMicroAssistCutoff;
-                dbg.inAssistZone = canAssist || canSettle;
+                    aimPitchStep = pitchErr * stepFrac;
+                    aimYawStep = yawErr * stepFrac;
 
-                int supportAction = 0;
-
-                if (canSettle && !overshot) {
-                    m_filtSettlePitch += (pitchErr - m_filtSettlePitch) * 0.44f;
-                    m_filtSettleYaw += (yawErr - m_filtSettleYaw) * 0.44f;
-                    const float shootBoost = shooting ? 1.45f : 1.f;
-                    const float settleMul = strength * (shooting ? 0.12f : 0.075f)
-                        * tickScale / responseDiv * shootBoost;
-                    aimPitchStep = m_filtSettlePitch * settleMul;
-                    aimYawStep = m_filtSettleYaw * settleMul;
-                    aimDxPix = -aimYawStep / degPerPx;
-                    aimDyPix =  aimPitchStep / degPerPx;
-                    const float maxSettlePx = 2.6f + strength * 1.4f;
-                    const float settleMag = std::sqrtf(aimDxPix * aimDxPix + aimDyPix * aimDyPix);
-                    if (settleMag > maxSettlePx && settleMag > 0.001f) {
-                        const float s = maxSettlePx / settleMag;
-                        aimDxPix *= s;
-                        aimDyPix *= s;
-                        aimPitchStep = aimDyPix * degPerPx;
-                        aimYawStep = -aimDxPix * degPerPx;
-                    }
-                    dbg.action = AimDebugAction::Settle;
-                    supportAction = 4;
-                } else if (canAssist) {
                     const float toward = userPitch * pitchErr + userYaw * yawErr;
-                    dbg.towardDot = toward;
-                    const float proximity = 1.f - std::clamp(errMag / assistFov, 0.f, 1.f);
-                    const float closeDamp = std::clamp(errMag / 0.65f, 0.15f, 1.f);
-                    const float towardDead = userMoveMag * (std::max)(errMag, 0.12f) * 0.07f;
-
-                    if (overshot && (crossedTarget || errMag > 0.28f)) {
-                        dbg.action = AimDebugAction::Brake;
-                        dbg.eventOvershoot = true;
-                        supportAction = 1;
-                        const float brake = crossedTarget ? brakeScale * 1.06f : brakeScale;
-                        aimPitchStep = -userPitch * brake;
-                        aimYawStep = -userYaw * brake;
-                    } else if (toward > towardDead) {
-                        dbg.action = AimDebugAction::Guide;
-                        supportAction = 2;
-                        const float guideMul = strength * (0.20f + 0.30f * (1.f - proximity * 0.80f))
-                            / responseDiv * tickScale * groupSpeed * closeDamp;
-                        aimPitchStep = userPitch * guideMul;
-                        aimYawStep = userYaw * guideMul;
-                        capAssistToUserMove(aimPitchStep, aimYawStep, userPitch, userYaw, strength);
-                    } else if (toward < -towardDead && errMag > kMicroAssistCutoff) {
-                        dbg.action = AimDebugAction::Counter;
-                        supportAction = 3;
-                        const float wrongness = std::clamp(
-                            -toward / (userMoveMag * (std::max)(errMag, 0.12f) + 0.002f),
-                            0.12f, 0.85f);
-                        const float counter = strength * wrongness * 0.42f;
-                        aimPitchStep = -userPitch * counter;
-                        aimYawStep = -userYaw * counter;
-                    } else {
-                        dbg.action = AimDebugAction::Idle;
+                    if (toward > 0.f && errMag > kAimDeadzoneDeg) {
+                        const float align = toward / (userMoveMag * errMag + 0.001f);
+                        const float boost = std::clamp(align, 0.f, 1.f) * strength * 0.10f;
+                        aimPitchStep += userPitch * boost;
+                        aimYawStep += userYaw * boost;
                     }
 
                     aimDxPix = -aimYawStep / degPerPx;
                     aimDyPix =  aimPitchStep / degPerPx;
-                } else if (!inZone) {
+                    dbg.action = AimDebugAction::Guide;
+                    dbg.towardDot = toward;
+                } else if (errMag > maxFov) {
                     dbg.action = AimDebugAction::OutOfFov;
                 } else {
                     dbg.action = AimDebugAction::UserBelowMin;
                 }
-
-                if (supportAction != 0 && m_lastSupportAction != 0
-                    && supportAction != m_lastSupportAction) {
-                    const float stepMag = std::sqrtf(aimDxPix * aimDxPix + aimDyPix * aimDyPix);
-                    if (stepMag < 1.6f)
-                        aimDxPix = aimDyPix = aimPitchStep = aimYawStep = 0.f;
-                }
-                if (supportAction != 0)
-                    m_lastSupportAction = supportAction;
-                else if (!canSettle)
-                    m_lastSupportAction = 0;
             }
 
             m_prevPitchErr = pitchErr;
@@ -893,14 +764,18 @@ void AimAssist::update(const Process& proc, const EntityManager& em, float scree
             m_viewInit = false;
             m_lastAssistPitch = 0.f;
             m_lastAssistYaw = 0.f;
-            const float errBlend = std::clamp(tickScale / (smooth * 1.15f), 0.07f, 0.38f);
-            m_filtPitchErr += (pitchErr - m_filtPitchErr) * errBlend;
-            m_filtYawErr += (yawErr - m_filtYawErr) * errBlend;
 
-            if (errMag > kAimDeadzoneDeg) {
+            const float smoothVal = effectiveAimSmooth(aimCfg.aimSmooth);
+            float stepFrac = std::clamp(tickScale * (2.5f / smoothVal), 0.006f, 0.35f);
+            if (errMag < 2.5f)
+                stepFrac = std::clamp(stepFrac * 0.85f, 0.03f, 0.28f);
+            if (errMag < 0.55f)
+                stepFrac = std::clamp(stepFrac * 0.65f, 0.03f, 0.18f);
+
+            if (errMag > 0.05f) {
                 dbg.action = AimDebugAction::Classic;
-                aimPitchStep = (m_filtPitchErr / smooth) * tickScale;
-                aimYawStep = (m_filtYawErr / smooth) * tickScale;
+                aimPitchStep = pitchErr * stepFrac;
+                aimYawStep = yawErr * stepFrac;
                 aimDxPix = -aimYawStep / degPerPx;
                 aimDyPix =  aimPitchStep / degPerPx;
             }
@@ -950,73 +825,53 @@ void AimAssist::update(const Process& proc, const EntityManager& em, float scree
 
     float rcsDxPix = 0.f;
     float rcsDyPix = 0.f;
-    const bool runRcs = rcsEnabled && (rcsStandalone || foundTarget)
+    const bool runRcs = rcsEnabled && spraying && (rcsStandalone || foundTarget)
         && (rcsX > 0.001f || rcsY > 0.001f);
 
     if (runRcs) {
         const int shotsFired = mem::read<int>(proc, localPawn + netvars::pawn::m_iShotsFired);
         if (shotsFired >= 1) {
             Vec3 punch{};
-            if (readAimPunch(proc, localPawn, punch)) {
-                const float degPerPx = sens * 0.022f;
-                const bool instantRcs = rcsSmooth <= 0.001f;
-
-                if (instantRcs) {
-                    const float needDx = (punch.y * 2.f) / degPerPx * rcsX;
-                    rcsDxPix = needDx - m_rcsTotalDx;
-                    m_rcsTotalDx = needDx;
-                    m_prevPunchYaw = punch.y;
-
-                    if (shotsFired <= 1) {
-                        m_prevPunchPitch = punch.x;
-                    } else {
-                        const float dPitch = punch.x - m_prevPunchPitch;
-                        m_prevPunchPitch = punch.x;
-                        rcsDyPix = -(dPitch * 2.f) / degPerPx * rcsY;
-                    }
-                } else if (shotsFired <= 1) {
-                    m_prevPunchPitch = punch.x;
-                    m_prevPunchYaw = punch.y;
-                    m_rcsTotalDx = 0.f;
-                } else {
-                    const float dPitch = punch.x - m_prevPunchPitch;
-                    const float dYaw = punch.y - m_prevPunchYaw;
-                    m_prevPunchPitch = punch.x;
-                    m_prevPunchYaw = punch.y;
-
-                    const float rawDy = -(dPitch * 2.f) / degPerPx * rcsY;
-                    float rawDx = 0.f;
-                    if (std::fabs(dYaw) >= kRcsYawDeadzone)
-                        rawDx = (dYaw * 2.f) / degPerPx * rcsX;
-                    else
-                        m_rcsYawComp *= 0.55f;
-
-                    const float yawSmooth = rcsSmooth * 1.25f;
-                    m_rcsYawComp += (rawDx - m_rcsYawComp) / yawSmooth;
-                    m_rcsPitchComp += (rawDy - m_rcsPitchComp) / rcsSmooth;
-                    rcsDxPix = m_rcsYawComp;
-                    rcsDyPix = m_rcsPitchComp;
+            if (readAimPunch(proc, localPawn, punch)
+                && std::isfinite(punch.x) && std::isfinite(punch.y)
+                && std::fabs(punch.x) <= 15.f && std::fabs(punch.y) <= 15.f) {
+                if (shotsFired < m_prevShotsFired) {
+                    m_prevPunchPitch = 0.f;
+                    m_prevPunchYaw = 0.f;
                 }
-            } else {
-                m_rcsPitchComp = 0.f;
-                m_rcsYawComp = 0.f;
-                m_rcsTotalDx = 0.f;
-                m_prevPunchPitch = 0.f;
-                m_prevPunchYaw = 0.f;
+
+                const float deltaPitch = punch.x - m_prevPunchPitch;
+                const float deltaYaw = punch.y - m_prevPunchYaw;
+                const float degPerPx = sens * 0.022f;
+
+                rcsDxPix = (deltaYaw * 2.f) / degPerPx * rcsX;
+                rcsDyPix = -(deltaPitch * 2.f) / degPerPx * rcsY;
+
+                if (rcsSmooth > 0.001f) {
+                    rcsDxPix /= (std::max)(1.f, rcsSmooth * 1.15f);
+                    rcsDyPix /= (std::max)(1.f, rcsSmooth);
+                }
+
+                const float maxRcsPx = 22.f;
+                const float rcsMag = std::sqrtf(rcsDxPix * rcsDxPix + rcsDyPix * rcsDyPix);
+                if (rcsMag > maxRcsPx && rcsMag > 0.001f) {
+                    const float s = maxRcsPx / rcsMag;
+                    rcsDxPix *= s;
+                    rcsDyPix *= s;
+                }
+
+                m_prevPunchPitch = punch.x;
+                m_prevPunchYaw = punch.y;
             }
         } else {
-            m_rcsPitchComp = 0.f;
-            m_rcsYawComp = 0.f;
-            m_rcsTotalDx = 0.f;
             m_prevPunchPitch = 0.f;
             m_prevPunchYaw = 0.f;
         }
+        m_prevShotsFired = shotsFired;
     } else {
-        m_rcsPitchComp = 0.f;
-        m_rcsYawComp = 0.f;
-        m_rcsTotalDx = 0.f;
         m_prevPunchPitch = 0.f;
         m_prevPunchYaw = 0.f;
+        m_prevShotsFired = 0;
     }
 
     const bool supportEngaged = foundTarget
@@ -1036,20 +891,9 @@ void AimAssist::update(const Process& proc, const EntityManager& em, float scree
     }
 
     if (supportModeActive) {
-        const float outMagPre = std::sqrtf(aimDxPix * aimDxPix + aimDyPix * aimDyPix);
-        const float microDead = 0.06f * (1.f - supportStrength * 0.65f);
-        if (std::fabs(aimDxPix) < microDead) aimDxPix = 0.f;
-        if (std::fabs(aimDyPix) < microDead) aimDyPix = 0.f;
-        const float outBlend = outMagPre < 1.8f
-            ? (0.88f + supportStrength * 0.10f)
-            : (0.62f + supportStrength * 0.28f);
-        if (m_lastSupportAction == 1) {
-            m_supportOutDx = aimDxPix;
-            m_supportOutDy = aimDyPix;
-        } else {
-            m_supportOutDx += (aimDxPix - m_supportOutDx) * outBlend;
-            m_supportOutDy += (aimDyPix - m_supportOutDy) * outBlend;
-        }
+        const float outBlend = 0.72f + supportStrength * 0.22f;
+        m_supportOutDx += (aimDxPix - m_supportOutDx) * outBlend;
+        m_supportOutDy += (aimDyPix - m_supportOutDy) * outBlend;
         aimDxPix = m_supportOutDx;
         aimDyPix = m_supportOutDy;
     } else {

@@ -9,13 +9,14 @@
 
 class SoundEsp {
 public:
-    void update(const EntityManager::Snapshot& snap);
+    void update(const EntityManager::Snapshot& snap, float dtSec);
     void render(Renderer& r, const ViewMatrix& vm, const FontAtlas* font);
 
 private:
     struct Event {
         Vec3     pos{};
         int      type = 0; // 0=footstep, 1=gunshot
+        bool     fromVisible = true;
         float    age = 0.f;
         float    maxAge = 1.8f;
         int      team = 0;
@@ -26,6 +27,7 @@ private:
         Vec3           origin{};
         int            shotsFired = 0;
         float          horizSpeed = 0.f;
+        std::uint64_t  lastStepMs = 0;
     };
 
     std::vector<Event> m_events;

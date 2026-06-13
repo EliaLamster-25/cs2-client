@@ -1,7 +1,6 @@
 #include "web/web_radar_publisher.h"
 
 #include "config.h"
-#include "analytics/match_intel.h"
 #include "game/entity_manager.h"
 #include "json.hpp"
 #include "memory/process.h"
@@ -273,61 +272,6 @@ void WebRadarPublisher::update(const Process& proc, const EntityManager& em) {
         { "x", bomb.origin.x },
         { "y", bomb.origin.y },
         { "site", bomb.site }
-    };
-
-    const auto intel = MatchIntel::instance().view();
-    json cues = json::array();
-    for (const auto& c : intel.cues) {
-        cues.push_back({
-            { "text", c.text },
-            { "severity", c.severity }
-        });
-    }
-
-    json threats = json::array();
-    for (const auto& tcard : intel.threats) {
-        threats.push_back({
-            { "name", tcard.name },
-            { "score", tcard.score },
-            { "kills", tcard.kills },
-            { "entry", tcard.entrySuccess },
-            { "clutch", tcard.clutchRate }
-        });
-    }
-
-    json replay = json::array();
-    for (const auto& ev : intel.replayEvents) {
-        replay.push_back({
-            { "atMs", ev.atMs },
-            { "type", ev.type },
-            { "text", ev.text },
-            { "x", ev.pos.x },
-            { "y", ev.pos.y }
-        });
-    }
-
-    auto heatToJson = [](const std::vector<MatchIntel::HeatPoint>& points) {
-        json arr = json::array();
-        for (const auto& p : points) {
-            arr.push_back({
-                { "cellX", p.cellX },
-                { "cellY", p.cellY },
-                { "count", p.count }
-            });
-        }
-        return arr;
-    };
-
-    payload["intel"] = {
-        { "currentRound", intel.currentRound },
-        { "roundLive", intel.roundLive },
-        { "replayIndex", intel.replayEventIndex },
-        { "replayMax", intel.replayEventMax },
-        { "cues", std::move(cues) },
-        { "threats", std::move(threats) },
-        { "replay", std::move(replay) },
-        { "deathHeat", heatToJson(intel.deathHeat) },
-        { "failedEntryHeat", heatToJson(intel.failedEntryHeat) }
     };
 
     enqueueSnapshot(payload.dump());

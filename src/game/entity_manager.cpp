@@ -2,6 +2,9 @@
 #include "pawn_services.h"
 #include "str_obf.h"
 #include "debug/overlay_log.h"
+#include "game/cs2_bones.h"
+#include "game/cs2_model.h"
+#include "game/bone_layout.h"
 #include "memory/rpm.h"
 #include "offsets/offsets.h"
 #include "offsets/netvars.h"
@@ -46,89 +49,6 @@ constexpr float kPreThrowVelocityToleranceSq = 48.0f * 48.0f;
 constexpr int kMinNearbyBoneCount       = 10;
 constexpr int kMinBoneLayoutScore       = 12;
 constexpr int kRawBoneCount             = 30;
-
-namespace raw_bone {
-constexpr int pelvis = 1;
-constexpr int spine = 3;
-constexpr int chest = 23;
-constexpr int neck = 6;
-constexpr int head = 7;
-constexpr int lShoulder = 9;
-constexpr int lElbow = 10;
-constexpr int lHand = 11;
-constexpr int rShoulder = 13;
-constexpr int rElbow = 14;
-constexpr int rHand = 15;
-constexpr int lHip = 17;
-constexpr int lKnee = 18;
-constexpr int lFoot = 19;
-constexpr int rHip = 20;
-constexpr int rKnee = 21;
-constexpr int rFoot = 22;
-}
-
-namespace bone_slot {
-constexpr int pelvis = 0;
-constexpr int spine = 2;
-constexpr int chest = 4;
-constexpr int neck = 5;
-constexpr int head = 6;
-constexpr int lShoulder = 8;
-constexpr int lElbow = 9;
-constexpr int lHand = 11;
-constexpr int rShoulder = 13;
-constexpr int rElbow = 14;
-constexpr int rHand = 16;
-constexpr int lHip = 22;
-constexpr int lKnee = 23;
-constexpr int lFoot = 24;
-constexpr int rHip = 25;
-constexpr int rKnee = 26;
-constexpr int rFoot = 27;
-}
-
-void mapBoneIfValid(const Vec3* rawBones,
-                    int rawBoneCount,
-                    int rawIndex,
-                    Vec3* outBones,
-                    int outIndex)
-{
-    if (rawIndex < 0 || rawIndex >= rawBoneCount)
-        return;
-    const Vec3& bone = rawBones[rawIndex];
-    if (!std::isfinite(bone.x) || !std::isfinite(bone.y) || !std::isfinite(bone.z))
-        return;
-    outBones[outIndex] = bone;
-}
-
-void normalizeBoneLayout(const Vec3* rawBones,
-                         int rawBoneCount,
-                         Vec3* outBones)
-{
-    std::memset(outBones, 0, sizeof(Vec3) * PlayerData::kBoneCount);
-
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::pelvis, outBones, bone_slot::pelvis);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::spine, outBones, bone_slot::spine);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::chest, outBones, bone_slot::chest);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::neck, outBones, bone_slot::neck);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::head, outBones, bone_slot::head);
-
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::lShoulder, outBones, bone_slot::lShoulder);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::lElbow, outBones, bone_slot::lElbow);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::lHand, outBones, bone_slot::lHand);
-
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::rShoulder, outBones, bone_slot::rShoulder);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::rElbow, outBones, bone_slot::rElbow);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::rHand, outBones, bone_slot::rHand);
-
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::lHip, outBones, bone_slot::lHip);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::lKnee, outBones, bone_slot::lKnee);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::lFoot, outBones, bone_slot::lFoot);
-
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::rHip, outBones, bone_slot::rHip);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::rKnee, outBones, bone_slot::rKnee);
-    mapBoneIfValid(rawBones, rawBoneCount, raw_bone::rFoot, outBones, bone_slot::rFoot);
-}
 
 float horizDistSq(const Vec3& a, const Vec3& b) {
     float dx = a.x - b.x;
@@ -330,43 +250,43 @@ int scoreBoneLayout(const Vec3* bones,
     };
 
     int score = 0;
-    if (valid(bone_slot::pelvis)) score += 2;
-    if (valid(bone_slot::spine)) score += 1;
-    if (valid(bone_slot::chest)) score += 2;
-    if (valid(bone_slot::neck)) score += 1;
-    if (valid(bone_slot::head)) score += 2;
-    if (valid(bone_slot::lShoulder)) score += 1;
-    if (valid(bone_slot::rShoulder)) score += 1;
-    if (valid(bone_slot::lHip)) score += 1;
-    if (valid(bone_slot::rHip)) score += 1;
-    if (valid(bone_slot::lKnee)) score += 1;
-    if (valid(bone_slot::rKnee)) score += 1;
-    if (valid(bone_slot::lFoot)) score += 1;
-    if (valid(bone_slot::rFoot)) score += 1;
+    if (valid(bone_layout::slot::pelvis)) score += 2;
+    if (valid(bone_layout::slot::spine)) score += 1;
+    if (valid(bone_layout::slot::chest)) score += 2;
+    if (valid(bone_layout::slot::neck)) score += 1;
+    if (valid(bone_layout::slot::head)) score += 2;
+    if (valid(bone_layout::slot::lShoulder)) score += 1;
+    if (valid(bone_layout::slot::rShoulder)) score += 1;
+    if (valid(bone_layout::slot::lHip)) score += 1;
+    if (valid(bone_layout::slot::rHip)) score += 1;
+    if (valid(bone_layout::slot::lKnee)) score += 1;
+    if (valid(bone_layout::slot::rKnee)) score += 1;
+    if (valid(bone_layout::slot::lFoot)) score += 1;
+    if (valid(bone_layout::slot::rFoot)) score += 1;
 
-    if (valid(bone_slot::pelvis) && valid(bone_slot::chest) && valid(bone_slot::head)) {
-        const Vec3& pelvis = bones[bone_slot::pelvis];
-        const Vec3& chest = bones[bone_slot::chest];
-        const Vec3& head = bones[bone_slot::head];
+    if (valid(bone_layout::slot::pelvis) && valid(bone_layout::slot::chest) && valid(bone_layout::slot::head)) {
+        const Vec3& pelvis = bones[bone_layout::slot::pelvis];
+        const Vec3& chest = bones[bone_layout::slot::chest];
+        const Vec3& head = bones[bone_layout::slot::head];
         if (pelvis.z < chest.z && chest.z < head.z)
             score += 4;
     }
 
-    if (valid(bone_slot::head)) {
-        const Vec3& head = bones[bone_slot::head];
+    if (valid(bone_layout::slot::head)) {
+        const Vec3& head = bones[bone_layout::slot::head];
         Vec3 d = head - headPos;
         if (d.lengthSq() < (20.f * 20.f))
             score += 2;
     }
 
-    if (valid(bone_slot::lShoulder) && valid(bone_slot::rShoulder)) {
-        const float shoulderSep = horizDistSq(bones[bone_slot::lShoulder], bones[bone_slot::rShoulder]);
+    if (valid(bone_layout::slot::lShoulder) && valid(bone_layout::slot::rShoulder)) {
+        const float shoulderSep = horizDistSq(bones[bone_layout::slot::lShoulder], bones[bone_layout::slot::rShoulder]);
         if (shoulderSep > (4.f * 4.f) && shoulderSep < (48.f * 48.f))
             score += 2;
     }
 
-    if (valid(bone_slot::lHip) && valid(bone_slot::rHip)) {
-        const float hipSep = horizDistSq(bones[bone_slot::lHip], bones[bone_slot::rHip]);
+    if (valid(bone_layout::slot::lHip) && valid(bone_layout::slot::rHip)) {
+        const float hipSep = horizDistSq(bones[bone_layout::slot::lHip], bones[bone_layout::slot::rHip]);
         if (hipSep > (2.f * 2.f) && hipSep < (40.f * 40.f))
             score += 1;
     }
@@ -377,8 +297,8 @@ int scoreBoneLayout(const Vec3* bones,
         if (valid(knee) && valid(foot) && bones[foot].z < bones[knee].z)
             ++score;
     };
-    legScore(bone_slot::lHip, bone_slot::lKnee, bone_slot::lFoot);
-    legScore(bone_slot::rHip, bone_slot::rKnee, bone_slot::rFoot);
+    legScore(bone_layout::slot::lHip, bone_layout::slot::lKnee, bone_layout::slot::lFoot);
+    legScore(bone_layout::slot::rHip, bone_layout::slot::rKnee, bone_layout::slot::rFoot);
 
     return score;
 }
@@ -721,10 +641,13 @@ void EntityManager::update(Process& proc) {
     const bool needGrenadeSim = needGrenadeEsp || g_cfg.grenadeTrajectory;
     const bool needBombStatus = g_cfg.bombTimerEnabled;
     const bool needSpectatorList = g_cfg.spectatorListEnabled;
-    const bool needRemotePlayers = needPlayerEsp || g_cfg.aimAssistEnabled;
+    const bool needSoundEsp = g_cfg.soundEspEnabled;
+    const bool needGrenadeHelper = g_cfg.grenadeHelperEnabled;
+    const bool needRemotePlayers = needPlayerEsp || g_cfg.aimAssistEnabled || needSoundEsp;
     const bool needPlayerScout = true; // Player Info tab / Leetify roster (independent of ESP)
-    const bool needPlayerSnapshot = needRemotePlayers || needPlayerScout || needGrenadeSim || needBombStatus || needSpectatorList;
-    const bool needPlayerVelocity = needPlayerEsp;
+    const bool needPlayerSnapshot = needRemotePlayers || needPlayerScout || needGrenadeSim
+        || needBombStatus || needSpectatorList || needSoundEsp;
+    const bool needPlayerVelocity = needPlayerEsp || needSoundEsp;
     const bool needPlayerBones = g_cfg.skeletonEnabled
         || g_cfg.skeletonOccluded
         || g_cfg.chamsEnabled
@@ -735,8 +658,6 @@ void EntityManager::update(Process& proc) {
     // Pre-throw simulation should not depend on full ESP enablement; it is used
     // by both in-game overlay and web radar trajectory rendering.
     const bool needPreThrow = g_cfg.grenadeTrajectory;
-    const bool needSoundEsp = g_cfg.soundEspEnabled;
-    const bool needGrenadeHelper = g_cfg.grenadeHelperEnabled;
 
     int tmpLocalTeam = 0;
     if (isLikelyPtr(localPawn))
@@ -1160,110 +1081,15 @@ void EntityManager::update(Process& proc) {
             //   4. Accept a partial ReadProcessMemory result so a single
             //      page-boundary miss doesn't silently kill all bones.
             p.bonesValid = false;
-            const bool needBonesForPlayer = needPlayerBones
-                && (p.screenRelevant || g_cfg.aimAssistEnabled);
-            if (needBonesForPlayer && isLikelyPtr(sceneNode)) {
-                auto bonePtr = mem::read<std::uintptr_t>(
-                    proc, sceneNode + netvars::skeleton::m_boneArrayPtr);
-                // Additional fallback offsets:
-                //   0x1E0 = CModelState+0x90 (used in some 2024/2025 CS2 builds)
-                //   0x1C8 = CModelState+0x78 (older builds)
-                if (!isLikelyPtr(bonePtr))
-                    bonePtr = mem::read<std::uintptr_t>(
-                        proc, sceneNode + 0x1E0);
-                if (!isLikelyPtr(bonePtr))
-                    bonePtr = mem::read<std::uintptr_t>(
-                        proc, sceneNode + (netvars::skeleton::m_boneArrayPtr - 8));
-
-                if (isLikelyPtr(bonePtr)) {
-                    Vec3 bestBones[PlayerData::kBoneCount]{};
-                    int bestMetric = -1;
-                    auto considerBones = [&](const Vec3* candidateBones, int candidateCount) {
-                        if (candidateCount < 4)
-                            return;
-
-                        Vec3 normalizedBones[PlayerData::kBoneCount]{};
-                        normalizeBoneLayout(candidateBones, candidateCount, normalizedBones);
-
-                        int layoutScore = scoreBoneLayout(normalizedBones, PlayerData::kBoneCount, p.origin, p.headPos);
-                        if (layoutScore < kMinBoneLayoutScore)
-                            return;
-
-                        int nearCount = nearbyBoneCount(normalizedBones, PlayerData::kBoneCount, p.origin, 200.f * 200.f);
-                        if (nearCount < kMinNearbyBoneCount)
-                            return;
-
-                        int metric = layoutScore * 100 + nearCount;
-                        if (metric <= bestMetric)
-                            return;
-
-                        std::memset(bestBones, 0, sizeof(bestBones));
-                        for (int b = 0; b < PlayerData::kBoneCount; ++b)
-                            bestBones[b] = normalizedBones[b];
-                        bestMetric = metric;
-                    };
-
-                    // Read bones once with max expected stride (16 floats = 64 bytes per bone).
-                    // Then interpret the same buffer in each known format â€” saves 3 RPM calls
-                    // per player per frame compared to reading each format separately.
-                    constexpr int kMaxBoneStride = 16;
-                    float rawBoneData[kRawBoneCount * kMaxBoneStride]{};
-                    mem::readRaw(proc, bonePtr, rawBoneData, sizeof(rawBoneData));
-                    const int totalFloats = static_cast<int>(sizeof(rawBoneData) / sizeof(float));
-
-                    // Try matrix3x4 (12 floats per bone) â€” position at indices 3, 7, 11
-                    {
-                        const int stride = 12;
-                        const int count = (std::min)(totalFloats / stride, kRawBoneCount);
-                        if (count >= 4) {
-                            Vec3 candidate[kRawBoneCount]{};
-                            for (int b = 0; b < count; b++)
-                                candidate[b] = { rawBoneData[b*stride + 3], rawBoneData[b*stride + 7], rawBoneData[b*stride + 11] };
-                            considerBones(candidate, count);
-                        }
-                    }
-
-                    // Try 4x4 matrix (16 floats per bone) â€” position at indices 3, 7, 11
-                    {
-                        const int stride = 16;
-                        const int count = (std::min)(totalFloats / stride, kRawBoneCount);
-                        if (count >= 4) {
-                            Vec3 candidate[kRawBoneCount]{};
-                            for (int b = 0; b < count; b++)
-                                candidate[b] = { rawBoneData[b*stride + 3], rawBoneData[b*stride + 7], rawBoneData[b*stride + 11] };
-                            considerBones(candidate, count);
-                        }
-                    }
-
-                    // Try 32-byte entries (8 floats per bone) â€” position at indices 0, 1, 2
-                    {
-                        const int stride = 8;
-                        const int count = (std::min)(totalFloats / stride, kRawBoneCount);
-                        if (count >= 4) {
-                            Vec3 candidate[kRawBoneCount]{};
-                            for (int b = 0; b < count; b++)
-                                candidate[b] = { rawBoneData[b*stride], rawBoneData[b*stride + 1], rawBoneData[b*stride + 2] };
-                            considerBones(candidate, count);
-                        }
-                    }
-
-                    // Try plain Vec3 (3 floats per bone) â€” position at indices 0, 1, 2
-                    {
-                        const int stride = 3;
-                        const int count = (std::min)(totalFloats / stride, kRawBoneCount);
-                        if (count >= 4) {
-                            Vec3 candidate[kRawBoneCount]{};
-                            for (int b = 0; b < count; b++)
-                                candidate[b] = { rawBoneData[b*stride], rawBoneData[b*stride + 1], rawBoneData[b*stride + 2] };
-                            considerBones(candidate, count);
-                        }
-                    }
-
-                    if (bestMetric >= 0) {
-                        std::memcpy(p.bones, bestBones, sizeof(bestBones));
-                        p.bonesValid = true;
-                    }
-                }
+            p.boneMatricesValid = false;
+            p.boneMatrixOk.fill(false);
+            p.skeleton = {};
+            const bool needBonesForPlayer = needPlayerBones;
+            if (needBonesForPlayer) {
+                Cs2Skeleton skel{};
+                if (readPlayerSkeleton(proc, pawn, skel))
+                    applySkeletonToPlayer(skel, p);
+                p.modelKey = readPlayerModelKey(proc, pawn);
             }
         }
     } else if (needPlayerSnapshot) {

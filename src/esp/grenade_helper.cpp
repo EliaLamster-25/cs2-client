@@ -23,6 +23,71 @@ void drawLabel(Renderer& r, const FontAtlas& font, float x, float y,
     r.drawText(font, x, y, text, color, size);
 }
 
+Vec3 forwardFromViewAngles(const Vec3& ang) {
+    const float pitch = ang.x * (3.14159265f / 180.f);
+    const float yaw = ang.y * (3.14159265f / 180.f);
+    const float cp = std::cosf(pitch);
+    return { cp * std::cosf(yaw), cp * std::sinf(yaw), -std::sinf(pitch) };
+}
+
+GrenadeLineupSpot buildTestSpot(const EntityManager::Snapshot& snap) {
+    GrenadeLineupSpot spot{};
+    spot.id = "test_spot";
+    spot.title = "Test smoke";
+    spot.description = "Example lineup at your feet";
+    spot.grenade = "smoke";
+    spot.stand = snap.localOrigin;
+    spot.standRadius = 48.f;
+    const Vec3 fwd = forwardFromViewAngles(snap.localViewAngles);
+    spot.aimPoint = {
+        snap.localOrigin.x + fwd.x * 420.f,
+        snap.localOrigin.y + fwd.y * 420.f,
+        snap.localOrigin.z + fwd.z * 420.f + 80.f
+    };
+    spot.throwType = "throw";
+    spot.instruction = "Throw";
+    return spot;
+}
+
+void renderSpot(Renderer& r, const FontAtlas& font, const GrenadeLineupSpot& spot,
+                const EntityManager::Snapshot& snap, const ViewMatrix& vm,
+                float cx, float cy, float sw, float sh,
+                GrenadeLineupManager& mgr) {
+    GrenadeLineupManager::SpotEval ev = mgr.evaluateSpot(
+        spot, snap.localOrigin, snap.localViewAngles, cx, cy, vm, sw, sh);
+
+    Vec2 standSc{};
+    if (!vm.worldToScreen(spot.stand, standSc, sw, sh))
+        return;
+
+    const unsigned int typeCol = grenadeTypeColor(spot.grenade);
+    const float markerR = ev.inStandPos ? 7.f : 5.f;
+    const unsigned int markerCol = ev.inStandPos ? 0xFF44FF88 : typeCol;
+
+    r.drawFilledCircle(standSc.x, standSc.y, markerR + 2.f, 0xAA000000);
+    r.drawFilledCircle(standSc.x, standSc.y, markerR, markerCol);
+
+    char labelBuf[128];
+    std::snprintf(labelBuf, sizeof(labelBuf), "%s", spot.title.c_str());
+    drawLabel(r, font, standSc.x + 10.f, standSc.y - 8.f, labelBuf, 0xFFFFFFFF, 13.f);
+    if (!spot.description.empty())
+        drawLabel(r, font, standSc.x + 10.f, standSc.y + 6.f,
+                  spot.description.c_str(), 0xFFAAAAAA, 11.f);
+
+    if (ev.inStandPos && spot.aimPoint.lengthSq() > 1.f) {
+        Vec2 aimSc{};
+        if (vm.worldToScreen(spot.aimPoint, aimSc, sw, sh)) {
+            const unsigned int dotCol = ev.aimAligned ? 0xFF33FF66 : 0xFFFFFFFF;
+            r.drawLine(cx, cy, aimSc.x, aimSc.y, 0x88FFFFFF, 1.f);
+            r.drawFilledCircle(aimSc.x, aimSc.y, 5.f, 0xAA000000);
+            r.drawFilledCircle(aimSc.x, aimSc.y, 4.f, dotCol);
+            const char* instr = spot.instruction.c_str();
+            const float tw = static_cast<float>(std::strlen(instr)) * 6.5f;
+            drawLabel(r, font, aimSc.x - tw * 0.5f, aimSc.y - 18.f, instr, dotCol, 12.f);
+        }
+    }
+}
+
 } // namespace
 
 void GrenadeHelper::render(Renderer& r, const EntityManager::Snapshot& snap,
@@ -30,9 +95,7 @@ void GrenadeHelper::render(Renderer& r, const EntityManager::Snapshot& snap,
     if (!g_cfg.grenadeHelperEnabled || !font)
         return;
 
-    const auto& mgr = GrenadeLineupManager::instance();
-    const auto spots = mgr.spotsForMap(snap.currentMapName);
-    if (spots.empty())
+    if (!snap.hasLocalPlayer)
         return;
 
     const float sw = static_cast<float>(r.screenWidth());
@@ -40,51 +103,30 @@ void GrenadeHelper::render(Renderer& r, const EntityManager::Snapshot& snap,
     const float cx = sw * 0.5f;
     const float cy = sh * 0.5f;
 
-    const Vec3& origin = snap.localOrigin;
-    const Vec3& viewAng = snap.localViewAngles;
-    if (!snap.hasLocalPlayer)
-        return;
+    auto& mgr = GrenadeLineupManager::instance();
+    const auto spots = mgr.spotsForMap(snap.currentMapName);
 
-    const GrenadeLineupManager::SpotEval* active = mgr.bestSpotForPlayer(
-        snap.currentMapName, origin, viewAng, cx, cy, vm, sw, sh);
-
-    for (const auto* spotPtr : spots) {
-        const auto& spot = *spotPtr;
-        GrenadeLineupManager::SpotEval ev = mgr.evaluateSpot(
-            spot, origin, viewAng, cx, cy, vm, sw, sh);
-
-        Vec2 standSc{};
-        if (!vm.worldToScreen(spot.stand, standSc, sw, sh))
-            continue;
-
-        const unsigned int typeCol = grenadeTypeColor(spot.grenade);
-        const float markerR = ev.inStandPos ? 7.f : 5.f;
-        const unsigned int markerCol = ev.inStandPos ? 0xFF44FF88 : typeCol;
-
-        r.drawFilledCircle(standSc.x, standSc.y, markerR + 2.f, 0xAA000000);
-        r.drawFilledCircle(standSc.x, standSc.y, markerR, markerCol);
-
-        char labelBuf[128];
-        std::snprintf(labelBuf, sizeof(labelBuf), "%s", spot.title.c_str());
-        drawLabel(r, *font, standSc.x + 10.f, standSc.y - 8.f, labelBuf, 0xFFFFFFFF, 13.f);
-        if (!spot.description.empty())
-            drawLabel(r, *font, standSc.x + 10.f, standSc.y + 6.f,
-                      spot.description.c_str(), 0xFFAAAAAA, 11.f);
-
-        if (ev.inStandPos && spot.aimPoint.lengthSq() > 1.f) {
-            Vec2 aimSc{};
-            if (vm.worldToScreen(spot.aimPoint, aimSc, sw, sh)) {
-                const unsigned int dotCol = ev.aimAligned ? 0xFF33FF66 : 0xFFFFFFFF;
-                r.drawLine(cx, cy, aimSc.x, aimSc.y, 0x88FFFFFF, 1.f);
-                r.drawFilledCircle(aimSc.x, aimSc.y, 5.f, 0xAA000000);
-                r.drawFilledCircle(aimSc.x, aimSc.y, 4.f, dotCol);
-
-                const char* instr = spot.instruction.c_str();
-                const float tw = static_cast<float>(std::strlen(instr)) * 6.5f;
-                drawLabel(r, *font, aimSc.x - tw * 0.5f, aimSc.y - 18.f, instr, dotCol, 12.f);
-            }
-        }
+    if (g_cfg.grenadeHelperTestSpot) {
+        const GrenadeLineupSpot testSpot = buildTestSpot(snap);
+        renderSpot(r, *font, testSpot, snap, vm, cx, cy, sw, sh, mgr);
     }
+
+    const GrenadeLineupManager::SpotEval* active = nullptr;
+    if (!spots.empty()) {
+        active = mgr.bestSpotForPlayer(
+            snap.currentMapName, snap.localOrigin, snap.localViewAngles, cx, cy, vm, sw, sh);
+    } else if (g_cfg.grenadeHelperTestSpot) {
+        static GrenadeLineupSpot testSpot{};
+        static GrenadeLineupManager::SpotEval testEval{};
+        testSpot = buildTestSpot(snap);
+        testEval = mgr.evaluateSpot(testSpot, snap.localOrigin, snap.localViewAngles,
+                                   cx, cy, vm, sw, sh);
+        testEval.spot = &testSpot;
+        active = &testEval;
+    }
+
+    for (const auto* spotPtr : spots)
+        renderSpot(r, *font, *spotPtr, snap, vm, cx, cy, sw, sh, mgr);
 
     if (active && active->inStandPos && !active->aimAligned && active->spot) {
         char hint[160];

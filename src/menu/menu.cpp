@@ -4,7 +4,6 @@
 #include "game/entity_manager.h"
 #include "game/game_sensitivity.h"
 #include "memory/process.h"
-#include "analytics/match_intel.h"
 #include "analytics/player_scout.h"
 #include "game/aim_style.h"
 #include "game/weapon_group.h"
@@ -35,7 +34,7 @@
 using json = nlohmann::json;
 
 static const char* kTabs[] = {
-    "Aim", "ESP", "World", "Nades", "System", "Intel", "Player Info", "Config"
+    "Aim", "ESP", "World", "Nades", "System", "Player Info", "", "Config"
 };
 static constexpr int kTabN = 8;
 static constexpr float kTabH = 46.f;
@@ -46,10 +45,10 @@ static const char* kTabSubtitles[] = {
     "Assist, weapons & hitboxes",
     "Player overlay & live preview",
     "Grenades, radar & bomb timer",
-    "Lineup helper & sound ESP",
+    "Lineup helper",
     "Performance & overlay control",
-    "Match intelligence & round analysis",
     "Leetify player stats & risk estimates",
+    "",
     "Cloud sync, save & load profiles"
 };
 
@@ -1284,6 +1283,7 @@ static json aimGroupToJson(const AimGroupConfig& cfg) {
     j["rcsSmooth"] = cfg.rcsSmooth;
     j["triggerEnabled"] = cfg.triggerEnabled;
     j["triggerDelayMs"] = cfg.triggerDelayMs;
+    j["triggerShotCooldownMs"] = cfg.triggerShotCooldownMs;
     j["triggerKey"] = cfg.triggerKey;
     return j;
 }
@@ -1302,7 +1302,7 @@ static void jsonToAimGroup(const json& j, AimGroupConfig& cfg) {
     setBool("hitboxLegs", cfg.hitboxLegs);
     setFloat("aimFov", cfg.aimFov);
     setFloat("aimSmooth", cfg.aimSmooth);
-    cfg.aimSmooth = std::clamp(cfg.aimSmooth, 1.f, 20.f);
+    cfg.aimSmooth = std::clamp(cfg.aimSmooth, 1.f, 50.f);
     setBool("rcsEnabled", cfg.rcsEnabled);
     setInt("rcsMode", cfg.rcsMode);
     setFloat("rcsX", cfg.rcsX);
@@ -1310,6 +1310,7 @@ static void jsonToAimGroup(const json& j, AimGroupConfig& cfg) {
     setFloat("rcsSmooth", cfg.rcsSmooth);
     setBool("triggerEnabled", cfg.triggerEnabled);
     setInt("triggerDelayMs", cfg.triggerDelayMs);
+    setInt("triggerShotCooldownMs", cfg.triggerShotCooldownMs);
     setInt("triggerKey", cfg.triggerKey);
     // Backward compatibility with previous single-slider configs.
     if (!j.contains("rcsX") && !j.contains("rcsY") && j.contains("rcsStrength")) {
@@ -1446,16 +1447,26 @@ static json configToJson(const OverlayConfig& cfg) {
     j["chamsEnabled"] = cfg.chamsEnabled;
     j["chamsOccluded"] = cfg.chamsOccluded;
     j["chamsStyle"] = cfg.chamsStyle;
+    j["chamsStyleV2"] = 1;
     j["chamsAlpha"] = cfg.chamsAlpha;
+    j["chamsOutlineThickness"] = cfg.chamsOutlineThickness;
 
     j["grenadeEnabled"] = cfg.grenadeEnabled;
     j["grenadeTrajectory"] = cfg.grenadeTrajectory;
     j["grenadeHelperEnabled"] = cfg.grenadeHelperEnabled;
+    j["grenadeHelperTestSpot"] = cfg.grenadeHelperTestSpot;
     j["grenadeLineupPackPath"] = cfg.grenadeLineupPackPath;
     j["grenadeLineupCloudId"] = cfg.grenadeLineupCloudId;
     j["soundEspEnabled"] = cfg.soundEspEnabled;
     j["soundEspGunshots"] = cfg.soundEspGunshots;
     j["soundEspFootsteps"] = cfg.soundEspFootsteps;
+    j["soundEspVisibleEnabled"] = cfg.soundEspVisibleEnabled;
+    j["soundEspOccludedEnabled"] = cfg.soundEspOccludedEnabled;
+    j["soundEspLineThickness"] = cfg.soundEspLineThickness;
+    j["soundEspRingExpand"] = cfg.soundEspRingExpand;
+    j["soundEspGunshotColor"] = colorToJson(cfg.soundEspGunshotColor);
+    j["soundEspFootstepColor"] = colorToJson(cfg.soundEspFootstepColor);
+    j["soundEspMode"] = cfg.soundEspMode;
     j["cloudConfigEnabled"] = cfg.cloudConfigEnabled;
     j["cloudActiveConfigId"] = cfg.cloudActiveConfigId;
     j["grenadeOffscreenInset"] = cfg.grenadeOffscreenInset;
@@ -1490,6 +1501,7 @@ static json configToJson(const OverlayConfig& cfg) {
 
     j["triggerbotEnabled"] = cfg.triggerbotEnabled;
     j["triggerbotDelayMs"] = cfg.triggerbotDelayMs;
+    j["triggerbotShotCooldownMs"] = cfg.triggerbotShotCooldownMs;
     j["triggerbotKey"] = cfg.triggerbotKey;
 
     j["aimAssistEnabled"] = cfg.aimAssistEnabled;
@@ -1793,16 +1805,38 @@ static void applyJsonToConfig(const json& j, OverlayConfig& cfg) {
     setBool("chamsEnabled", cfg.chamsEnabled);
     setBool("chamsOccluded", cfg.chamsOccluded);
     setInt("chamsStyle", cfg.chamsStyle);
+    if (!j.contains("chamsStyleV2")) {
+        if (cfg.chamsStyle == 0)
+            cfg.chamsStyle = 2;
+        else if (cfg.chamsStyle == 1)
+            cfg.chamsStyle = 0;
+        else if (cfg.chamsStyle == 2)
+            cfg.chamsStyle = 3;
+    }
+    cfg.chamsStyle = std::clamp(cfg.chamsStyle, 0, 3);
     setFloat("chamsAlpha", cfg.chamsAlpha);
+    setFloat("chamsOutlineThickness", cfg.chamsOutlineThickness);
+    cfg.chamsOutlineThickness = std::clamp(cfg.chamsOutlineThickness, 1.f, 8.f);
 
     setBool("grenadeEnabled", cfg.grenadeEnabled);
     setBool("grenadeTrajectory", cfg.grenadeTrajectory);
     setBool("grenadeHelperEnabled", cfg.grenadeHelperEnabled);
+    setBool("grenadeHelperTestSpot", cfg.grenadeHelperTestSpot);
     if (j.contains("grenadeLineupPackPath")) cfg.grenadeLineupPackPath = j["grenadeLineupPackPath"].get<std::string>();
     if (j.contains("grenadeLineupCloudId")) cfg.grenadeLineupCloudId = j["grenadeLineupCloudId"].get<std::string>();
     setBool("soundEspEnabled", cfg.soundEspEnabled);
     setBool("soundEspGunshots", cfg.soundEspGunshots);
     setBool("soundEspFootsteps", cfg.soundEspFootsteps);
+    setBool("soundEspVisibleEnabled", cfg.soundEspVisibleEnabled);
+    setBool("soundEspOccludedEnabled", cfg.soundEspOccludedEnabled);
+    setFloat("soundEspLineThickness", cfg.soundEspLineThickness);
+    setFloat("soundEspRingExpand", cfg.soundEspRingExpand);
+    if (j.contains("soundEspGunshotColor")) jsonToColor(j["soundEspGunshotColor"], cfg.soundEspGunshotColor);
+    if (j.contains("soundEspFootstepColor")) jsonToColor(j["soundEspFootstepColor"], cfg.soundEspFootstepColor);
+    setInt("soundEspMode", cfg.soundEspMode);
+    cfg.soundEspMode = std::clamp(cfg.soundEspMode, 0, 1);
+    cfg.soundEspLineThickness = std::clamp(cfg.soundEspLineThickness, 0.5f, 6.f);
+    cfg.soundEspRingExpand = std::clamp(cfg.soundEspRingExpand, 8.f, 120.f);
     setBool("cloudConfigEnabled", cfg.cloudConfigEnabled);
     if (j.contains("cloudActiveConfigId")) cfg.cloudActiveConfigId = j["cloudActiveConfigId"].get<std::string>();
     setFloat("grenadeOffscreenInset", cfg.grenadeOffscreenInset);
@@ -1853,6 +1887,7 @@ static void applyJsonToConfig(const json& j, OverlayConfig& cfg) {
 
     setBool("triggerbotEnabled", cfg.triggerbotEnabled);
     setInt("triggerbotDelayMs", cfg.triggerbotDelayMs);
+    setInt("triggerbotShotCooldownMs", cfg.triggerbotShotCooldownMs);
     setInt("triggerbotKey", cfg.triggerbotKey);
 
     setBool("aimAssistEnabled", cfg.aimAssistEnabled);
@@ -1860,7 +1895,7 @@ static void applyJsonToConfig(const json& j, OverlayConfig& cfg) {
     setInt("aimBone", cfg.aimBone);
     setFloat("aimFov", cfg.aimFov);
     setFloat("aimSmooth", cfg.aimSmooth);
-    cfg.aimSmooth = std::clamp(cfg.aimSmooth, 1.f, 20.f);
+    cfg.aimSmooth = std::clamp(cfg.aimSmooth, 1.f, 50.f);
     setFloat("aimBoneOffsetZ", cfg.aimBoneOffsetZ);
     setFloat("aimHeadForward", cfg.aimHeadForward);
     setFloat("aimSensitivity", cfg.aimSensitivity);
@@ -2389,7 +2424,7 @@ void Menu::render(Renderer& renderer, const EntityManager& em, const Process& pr
     drawSidebar();
 
     // Route each tab to its panel
-    if (m_activeTab != 6)
+    if (m_activeTab != 5)
         m_leetifyPromptDismissed = false;
 
     switch (m_activeTab) {
@@ -2398,8 +2433,7 @@ void Menu::render(Renderer& renderer, const EntityManager& em, const Process& pr
         case 2: drawWorldPanel(); break;
         case 3: drawNadesPanel(em); break;
         case 4: drawSystemPanel(); break;
-        case 5: drawIntelPanel(em); break;
-        case 6: drawPlayerInfoPanel(em); break;
+        case 5: drawPlayerInfoPanel(em); break;
         case 7: drawConfigsPanel(); break;
         default: {
             drawPanelHeader(m_activeTab);
@@ -2589,7 +2623,7 @@ void Menu::drawSidebar() {
     };
 
     const float tabGap = S(40.f);
-    for (int i = 0; i < 7; ++i)
+    for (int i = 0; i < 6; ++i)
         drawTab(i, startY + i * tabGap);
 
     const float userPanelH = S(68.f);
@@ -3285,7 +3319,7 @@ void Menu::drawAimbotPanel() {
         m_gui.sliderFloatValue("aimFov", "FOV radius", &aimCfg.aimFov, 0.5f, 30.f, "%.0f°", 74.f);
         aimCols.syncLeft(m_gui.cursorY());
         aimCols.beginRight(m_gui);
-        m_gui.sliderFloatValue("aimSmooth", "Smoothing", &aimCfg.aimSmooth, 1.f, 20.f, "%.1f", 74.f);
+        m_gui.sliderFloatValue("aimSmooth", "Smoothing", &aimCfg.aimSmooth, 1.f, 50.f, "%.1f", 74.f);
         aimCols.syncRight(m_gui.cursorY());
         aimCols.end(m_gui);
 
@@ -3321,8 +3355,11 @@ void Menu::drawAimbotPanel() {
         m_gui.dummy(8.f);
         m_gui.toggleCheckbox(("aimTrigEnabled_" + groupSuffix).c_str(), "Triggerbot", &aimCfg.triggerEnabled, 44.f);
         float trigDelay = static_cast<float>(aimCfg.triggerDelayMs);
-        m_gui.sliderFloatValue(("aimTrigDelay_" + groupSuffix).c_str(), "Trigger delay (ms)", &trigDelay, 0.f, 100.f, "%.0f", 74.f);
+        m_gui.sliderFloatValue(("aimTrigDelay_" + groupSuffix).c_str(), "First-shot delay (ms)", &trigDelay, 0.f, 100.f, "%.0f", 74.f);
         aimCfg.triggerDelayMs = static_cast<int>(trigDelay + 0.5f);
+        float trigCooldown = static_cast<float>(aimCfg.triggerShotCooldownMs);
+        m_gui.sliderFloatValue(("aimTrigCd_" + groupSuffix).c_str(), "Between-shots cooldown (ms)", &trigCooldown, 0.f, 500.f, "%.0f", 74.f);
+        aimCfg.triggerShotCooldownMs = static_cast<int>(trigCooldown + 0.5f);
         m_gui.keybindCard(("aimTrigKey_" + groupSuffix).c_str(), "Trigger key", &aimCfg.triggerKey, 58.f);
 
         m_gui.dummy(8.f);
@@ -3695,8 +3732,8 @@ void Menu::drawEspPanel() {
     drawPanelHeader(1);
 
     // ── Sub-tabs ──────────────────────────────────────────────────────────────
-    constexpr int kPlayerTabCount = 4;
-    const char* kPlayerTabs[kPlayerTabCount] = { "General", "Visible", "Occluded", "Style" };
+    constexpr int kPlayerTabCount = 5;
+    const char* kPlayerTabs[kPlayerTabCount] = { "General", "Visible", "Occluded", "Style", "Sound" };
 
     const float tabBarY = m_gui.cursorY();
     const float tabItemH = S(42.f);
@@ -3760,6 +3797,7 @@ void Menu::drawEspPanel() {
     const bool isVisible = (m_playerSubTab == 1);
     const bool isOcc = (m_playerSubTab == 2);
     const bool isSizes = (m_playerSubTab == 3);
+    const bool isSound = (m_playerSubTab == 4);
 
     if (isSettings) {
         const float sectionY = m_gui.cursorY();
@@ -3824,22 +3862,32 @@ void Menu::drawEspPanel() {
         m_gui.sliderFloatValue("plBoxThk", "Box thickness", &g_cfg.boxThickness, 0.5f, 5.f, "%.1f");
         m_gui.sliderFloatValue("plBoxW", "Box width", &g_cfg.boxWidthScale, 0.35f, 2.5f, "%.2fx");
         m_gui.sliderFloatValue("plHpW", "HP bar width", &g_cfg.hpBarWidth, 1.f, 10.f, "%.0f");
-        m_gui.sliderFloatValue("plChamsA", "Chams alpha", &g_cfg.chamsAlpha, 0.f, 1.f, "%.2f");
-        static const char* kChamsStyles[] = { "Bone capsules", "Mesh (GLB)", "Silhouette (2D)" };
-        m_gui.comboField("plChamsStyle", "Chams style", kChamsStyles, 3, &g_cfg.chamsStyle, 72.f);
-        if (g_cfg.chamsStyle == 1) {
-            static ChamsMeshLibrary s_chamsStatus;
-            s_chamsStatus.initOnce();
-            if (s_chamsStatus.ready())
-                m_gui.label("Mesh models loaded.", Theme::TEXT_MUTED, 14.f);
-            else {
-                const std::string& msg = s_chamsStatus.statusMessage();
-                m_gui.label(msg.empty() ? "Failed to load .glb meshes." : msg.c_str(), 0xFFFF8A65, 14.f);
-            }
-        }
+        m_gui.sliderFloatValue("plChamsA", "Outline alpha", &g_cfg.chamsAlpha, 0.f, 1.f, "%.2f");
+        m_gui.sliderFloatValue("plChamsThk", "Outline thickness", &g_cfg.chamsOutlineThickness, 0.75f, 8.f, "%.1f");
+        static const char* kChamsStyles[] = {
+            "Wireframe GLB", "Solid GLB", "Bone silhouette", "Bone capsules"
+        };
+        m_gui.comboField("plChamsStyle", "Chams style", kChamsStyles, 4, &g_cfg.chamsStyle, 72.f);
+        g_cfg.chamsStyle = std::clamp(g_cfg.chamsStyle, 0, 3);
         m_gui.sliderFloatValue("plInfoTextSz", "Info text size", &g_cfg.infoTextSize, 10.f, 24.f, "%.1f");
         cols.syncLeft(m_gui.cursorY());
         cols.end(m_gui);
+    } else if (isSound) {
+        m_gui.label("Sound ESP", Theme::TEXT, 20.f);
+        m_gui.dummy(S(8.f));
+        m_gui.toggleCheckbox("sndEsp", "Sound ESP", &g_cfg.soundEspEnabled);
+        m_gui.toggleCheckbox("sndGun", "Gunshot rings", &g_cfg.soundEspGunshots);
+        m_gui.toggleCheckbox("sndStep", "Footstep rings", &g_cfg.soundEspFootsteps);
+        m_gui.toggleCheckbox("sndVis", "Visible players", &g_cfg.soundEspVisibleEnabled);
+        m_gui.toggleCheckbox("sndOcc", "Occluded players", &g_cfg.soundEspOccludedEnabled);
+        static const char* kSoundModes[] = { "2D screen rings", "3D ground rings" };
+        m_gui.label("Render mode", Theme::TEXT_MUTED, 15.f);
+        if (m_gui.comboBox("##sndMode", kSoundModes, 2, &g_cfg.soundEspMode))
+            g_cfg.soundEspMode = std::clamp(g_cfg.soundEspMode, 0, 1);
+        m_gui.sliderFloatValue("sndThk", "Ring line thickness", &g_cfg.soundEspLineThickness, 0.5f, 6.f, "%.1f", 74.f);
+        m_gui.sliderFloatValue("sndExp", "Ring expand speed", &g_cfg.soundEspRingExpand, 8.f, 120.f, "%.0f", 74.f);
+        m_gui.colorEdit4("Gunshot color", g_cfg.soundEspGunshotColor);
+        m_gui.colorEdit4("Footstep color", g_cfg.soundEspFootstepColor);
     }
 
     if (isOcc) {
@@ -4594,6 +4642,7 @@ void Menu::drawNadesPanel(const EntityManager& em) {
     m_gui.advanceY(S(28.f));
 
     m_gui.toggleCheckbox("nadeHelp", "Grenade lineup helper", &g_cfg.grenadeHelperEnabled);
+    m_gui.toggleCheckbox("nadeTest", "Show test spot at your position", &g_cfg.grenadeHelperTestSpot);
     m_gui.label("Stand markers, aim dots, and throw instructions in-game.", Theme::TEXT_MUTED, C(12.f));
     m_gui.dummy(S(8.f));
 
@@ -4673,14 +4722,6 @@ void Menu::drawNadesPanel(const EntityManager& em) {
         }
         m_gui.advanceY(rowH + S(4.f));
     }
-
-    m_gui.dummy(S(14.f));
-    r.drawText(f, clipX, m_gui.cursorY(), "Sound ESP", Theme::TEXT, C(18.f));
-    m_gui.advanceY(S(28.f));
-    m_gui.toggleCheckbox("sndEsp", "Sound ESP", &g_cfg.soundEspEnabled);
-    m_gui.toggleCheckbox("sndGun", "Gunshot rings", &g_cfg.soundEspGunshots);
-    m_gui.toggleCheckbox("sndStep", "Footstep rings", &g_cfg.soundEspFootsteps);
-    m_gui.label("Expanding rings at estimated gunshot and footstep locations.", Theme::TEXT_MUTED, C(12.f));
 
     r.setClipRect(0, 0, 0, 0);
 }
@@ -4957,7 +4998,7 @@ void Menu::drawPlayerInfoPanel(const EntityManager& em) {
     float w = m_winW - m_sideW;
     float pad = Theme::PADDING * s;
 
-    drawPanelHeader(6);
+    drawPanelHeader(5);
 
     float clipX = x + pad;
     float clipY = m_gui.cursorY();
@@ -5289,155 +5330,4 @@ void Menu::drawPlayerDetailOverlay() {
     m_gui.setItemWidth(modalW - pad * 2.f);
     if (m_gui.accentButton("playerDetailClose", "Close", 0.f, S(42.f)))
         m_playerDetailSteamId = 0;
-}
-
-void Menu::drawIntelPanel(const EntityManager& em) {
-    (void)em;
-    const float s = m_uiScale;
-    auto S = [s](float v) { return v * s; };
-
-    float x = m_winX + m_sideW, y = m_winY;
-    float w = m_winW - m_sideW;
-    float pad = Theme::PADDING * s;
-
-    auto intelView = MatchIntel::instance().view();
-
-    drawPanelHeader(5);
-
-    float clipX = x + pad;
-    float clipY = m_gui.cursorY();
-    float clipW = w - pad * 2.f;
-    float clipH = m_winH - (clipY - y) - pad;
-
-    bool clipHovered = m_gui.mouseX() >= clipX && m_gui.mouseX() <= clipX + clipW
-                    && m_gui.mouseY() >= clipY && m_gui.mouseY() <= clipY + clipH;
-    if (clipHovered) {
-        float wheel = ImGui::GetIO().MouseWheel;
-        if (wheel != 0.f)
-            m_intelScrollTarget -= wheel * S(42.f);
-    }
-
-    m_intelScroll = smoothValue(m_intelScroll, m_intelScrollTarget, 0.22f, m_frameDt);
-
-    m_gui.setCursor(clipX, clipY - m_intelScroll);
-    m_gui.setItemWidth(clipW - S(10.f));
-    auto& r = m_gui.renderer();
-    r.setClipRect(clipX, clipY, clipW, clipH);
-
-    m_gui.label("Match-State Intelligence", Theme::TEXT, 22.f);
-    m_gui.dummy(10.f);
-
-    if (intelView.cues.empty()) {
-        m_gui.label("No high-impact cues right now.", Theme::TEXT_MUTED, 13.f);
-    } else {
-        for (const auto& cue : intelView.cues) {
-            unsigned int col = Theme::TEXT_MUTED;
-            if (cue.severity == 1) col = 0xFFFFD77A;
-            if (cue.severity >= 2) col = 0xFFFF8A8A;
-            m_gui.label(cue.text.c_str(), col, 13.f);
-        }
-    }
-
-    m_gui.separator();
-
-    m_gui.label("Threat Board", Theme::TEXT, 22.f);
-    m_gui.dummy(8.f);
-    if (intelView.threats.empty()) {
-        m_gui.label("No enemy threat data yet this match.", Theme::TEXT_MUTED, 13.f);
-    } else {
-        for (const auto& t : intelView.threats) {
-            char line[256];
-            std::snprintf(line, sizeof(line),
-                "%s  K:%d  entry:%.0f%%  clutch:%.0f%%  score:%.0f",
-                t.name.c_str(), t.kills, t.entrySuccess * 100.f, t.clutchRate * 100.f, t.score);
-            m_gui.label(line, Theme::TEXT, 13.f);
-        }
-    }
-
-    m_gui.separator();
-
-    m_gui.label("Session Summary", Theme::TEXT, 22.f);
-    m_gui.dummy(8.f);
-    {
-        char sum[256];
-        std::snprintf(sum, sizeof(sum), "Map: %s   Round: %d%s   Deaths: %d   Stored rounds: %d",
-            intelView.mapName.empty() ? "unknown" : intelView.mapName.c_str(),
-            intelView.currentRound, intelView.roundLive ? " (live)" : "",
-            intelView.localDeaths, intelView.storedRoundCount);
-        m_gui.label(sum, Theme::TEXT_MUTED, 13.f);
-    }
-
-    m_gui.separator();
-
-    m_gui.label("Hot Zones", Theme::TEXT, 22.f);
-    m_gui.dummy(8.f);
-    auto drawHeat = [&](const char* title, const std::vector<MatchIntel::HeatPoint>& heat) {
-        m_gui.label(title, Theme::TEXT_MUTED, 14.f);
-        if (heat.empty()) {
-            m_gui.label("  (none yet)", Theme::TEXT_MUTED, 12.f);
-            return;
-        }
-        for (const auto& h : heat) {
-            char hz[128];
-            std::snprintf(hz, sizeof(hz), "  cell (%d,%d)  x%.0f y%.0f  hits:%d",
-                h.cellX, h.cellY, h.cellX * 512.f, h.cellY * 512.f, h.count);
-            m_gui.label(hz, Theme::TEXT, 12.f);
-        }
-    };
-    drawHeat("Death locations", intelView.deathHeat);
-    drawHeat("Failed entries", intelView.failedEntryHeat);
-
-    m_gui.separator();
-
-    m_gui.label("Round Replay Timeline", Theme::TEXT, 22.f);
-    m_gui.dummy(10.f);
-    m_gui.label((std::string("Round #") + std::to_string(intelView.currentRound) + (intelView.roundLive ? " (live)" : "")).c_str(), Theme::TEXT_MUTED, 13.f);
-    if (intelView.replayRoundMax > 0) {
-        float roundIdx = static_cast<float>(intelView.replayRoundIndex);
-        if (m_gui.sliderFloatValue("intelReplayRound", "Stored Round", &roundIdx, 0.f, static_cast<float>(intelView.replayRoundMax), "%.0f"))
-            MatchIntel::instance().setReplayRoundIndex(static_cast<int>(roundIdx + 0.5f));
-    }
-    const float replayMax = static_cast<float>((std::max)(0, intelView.replayEventMax));
-    if (replayMax > 0.f) {
-        float replayIdx = static_cast<float>(intelView.replayEventIndex);
-        if (m_gui.sliderFloatValue("replayEventIdx", "Event Scrubber", &replayIdx, 0.f, replayMax, "%.0f"))
-            MatchIntel::instance().setReplayEventIndex(static_cast<int>(replayIdx + 0.5f));
-    } else {
-        m_gui.label("No replay events captured yet.", Theme::TEXT_MUTED, 13.f);
-    }
-
-    if (!intelView.replayEvents.empty()) {
-        const int idx = std::clamp(intelView.replayEventIndex, 0, static_cast<int>(intelView.replayEvents.size()) - 1);
-        const auto& ev = intelView.replayEvents[idx];
-        m_gui.label((std::string("[") + ev.type + "] " + ev.text).c_str(), Theme::TEXT, 13.f);
-        if (ev.pos.lengthSq() > 1.f) {
-            char pos[96];
-            std::snprintf(pos, sizeof(pos), "  @ (%.0f, %.0f, %.0f)", ev.pos.x, ev.pos.y, ev.pos.z);
-            m_gui.label(pos, Theme::TEXT_MUTED, 12.f);
-        }
-    } else {
-        m_gui.label("Timeline is empty for this round yet.", Theme::TEXT_MUTED, 13.f);
-    }
-
-    m_gui.separator();
-    if (m_gui.accentButton("intelReset", "Reset session intel"))
-        MatchIntel::instance().resetSession();
-
-    float contentHeight = m_gui.cursorY() - (clipY - m_intelScroll);
-    r.clearClipRect();
-
-    m_intelMaxScroll = (std::max)(0.f, contentHeight - clipH);
-    if (m_intelScrollTarget < 0.f) m_intelScrollTarget = 0.f;
-    if (m_intelScrollTarget > m_intelMaxScroll) m_intelScrollTarget = m_intelMaxScroll;
-    if (m_intelScroll < 0.f) m_intelScroll = 0.f;
-    if (m_intelScroll > m_intelMaxScroll) m_intelScroll = m_intelMaxScroll;
-
-    if (m_intelMaxScroll > 0.5f) {
-        float trackX = clipX + clipW - S(5.f);
-        r.drawRoundedFilledRect(trackX, clipY, S(3.f), clipH, 0xFF101015, S(2.f));
-        float thumbH = (std::max)(S(36.f), clipH * (clipH / (contentHeight + 0.001f)));
-        float t = m_intelScroll / m_intelMaxScroll;
-        float thumbY = clipY + (clipH - thumbH) * t;
-        r.drawRoundedFilledRect(trackX, thumbY, S(3.f), thumbH, 0xFF8E95E8, S(2.f));
-    }
 }

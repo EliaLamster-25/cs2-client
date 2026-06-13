@@ -44,7 +44,6 @@ private:
     void drawWorldPanel();
     void drawNadesPanel(const EntityManager& em);
     void drawSystemPanel();
-    void drawIntelPanel(const EntityManager& em);
     void drawPlayerInfoPanel(const EntityManager& em);
     void drawPlayerDetailOverlay();
 
@@ -87,19 +86,14 @@ private:
     float m_systemMaxScroll = 0.f;
     float m_systemScrollTarget = 0.f;
 
-    // Intel tab scrolling
-    float m_intelScroll = 0.f;
-    float m_intelMaxScroll = 0.f;
-    float m_intelScrollTarget = 0.f;
-
     // Player Info tab scrolling
     float m_playerInfoScroll = 0.f;
     float m_playerInfoMaxScroll = 0.f;
     float m_playerInfoScrollTarget = 0.f;
 
     // ESP tab
-    int   m_playerSubTab = 0; // 0=General, 1=Visible, 2=Occluded, 3=Style
-    std::array<float, 4> m_playerSubTabAnim{};
+    int   m_playerSubTab = 0; // 0=General, 1=Visible, 2=Occluded, 3=Style, 4=Sound
+    std::array<float, 5> m_playerSubTabAnim{};
     float m_playersScroll = 0.f;
     float m_playersMaxScroll = 0.f;
     float m_playersScrollTarget = 0.f;

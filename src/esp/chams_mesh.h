@@ -14,6 +14,29 @@ public:
     const std::string& searchHint() const { return m_searchHint; }
     const std::string& statusMessage() const { return m_statusMessage; }
 
+    bool drawPlayerWireframe(Renderer& r,
+                             const PlayerData& player,
+                             const ViewMatrix& vm,
+                             unsigned int visCol,
+                             unsigned int occCol,
+                             bool drawVisible,
+                             bool drawOccluded,
+                             float sw,
+                             float sh,
+                             const Vec3& predDelta);
+
+    bool drawPlayerSolid(Renderer& r,
+                         const PlayerData& player,
+                         const ViewMatrix& vm,
+                         unsigned int visCol,
+                         unsigned int occCol,
+                         bool drawVisible,
+                         bool drawOccluded,
+                         float sw,
+                         float sh,
+                         const Vec3& predDelta);
+
+    /// @deprecated Use drawPlayerSolid — kept for callers.
     bool drawPlayer(Renderer& r,
                     const PlayerData& player,
                     const ViewMatrix& vm,
@@ -25,7 +48,7 @@ public:
                     float sh,
                     const Vec3& predDelta);
 
-    /// Flat filled player silhouette with a thin outer outline (2D overlay style).
+    /// @deprecated Use bone silhouette in esp_renderer — kept for API compat.
     bool drawPlayerSilhouette2D(Renderer& r,
                                 const PlayerData& player,
                                 const ViewMatrix& vm,

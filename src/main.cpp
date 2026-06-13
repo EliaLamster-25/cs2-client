@@ -20,7 +20,6 @@
 #include "game/aim_assist.h"
 #include "esp/esp_renderer.h"
 #include "menu/menu.h"
-#include "analytics/match_intel.h"
 #include "game/aim_style.h"
 #include "debug/aim_debug.h"
 #include "web/web_radar_publisher.h"
@@ -335,8 +334,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
             }
             auto t0 = std::chrono::steady_clock::now();
             entityMgr.update(proc);
-            const auto entitySnap = entityMgr.snapshot();
-            MatchIntel::instance().update(entitySnap);
             if (AimCalibration::instance().isActive())
                 AimCalibration::instance().update(proc, entityMgr, 5.f);
             triggerbot.update(proc, entityMgr);
